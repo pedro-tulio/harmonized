@@ -1,0 +1,10 @@
+load py_env/miniconda3/25.7.0 environment (rh9)
+Unloading the cpe module is insufficient to restore the system defaults.
+Please run 'source
+/opt/cray/pe/cpe/24.07/restore_lmod_system_defaults.[csh|sh]'. 
+remove gcc/13.2 - cray-mpich/8.1.30 - milan - cpe 24.07
+load gcc/13.2 - cray-mpich/8.1.30 - milan - cpe 24.07
+load math/mkl/2025.0/lp64/blas-lapack_gcc environment (rh9)
+load py_env/python/3.11.7 environment (rh9)
+load atomic_simu/charmm/c50b2 environment
+/home/2022004/dperah02/GRESH/PMI/1pmi-capmi/1pmi-md/pyaMDeNM/pyAdMD-extcollect/openmm-gpu/pyadmd-distrib/examples/1pmi/run-enm-simple.sh: line 14: /home/2022004/dperah02/.conda/envs/pyadmd-openmm/bin/python -m pyadmd: No such file or directory

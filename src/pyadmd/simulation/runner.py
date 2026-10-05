@@ -1,0 +1,1335 @@
+"""Orchestrates running, restarting, and appending aMDeNM replica simulations."""
+
+import csv
+import json
+import os
+import shutil
+import time
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+import MDAnalysis as mda
+from openmm import unit
+
+from pyadmd.console import ConsoleConfig
+from pyadmd.constants import AKMA_VEL_TO_NM_PS
+from pyadmd.geometry import _kabsch_align
+from pyadmd.io.dcd import _count_dcd_frames
+from pyadmd.io.namd import NAMDInputReader
+from pyadmd.io.openmm_restart import OpenMMRestartReader
+from pyadmd.io.state import SystemState, make_reference_universe
+from pyadmd.enm.calculator import ENMCalculator
+from pyadmd.modes.exciter import ModeExciter
+from pyadmd.modes.subspace import harmonize_and_transport
+from pyadmd.simulation.engine import OpenMMSimulationEngine
+from pyadmd.simulation.system_builder import OpenMMSystemBuilder
+
+
+class SimulationRunner:
+    """
+    Handles running, restarting, and appending aMDeNM simulations.
+
+    This class provides a unified interface for managing simulation runs,
+    including initialization, execution, and cleanup of replica simulations.
+
+    Attributes:
+        console (ConsoleConfig): Console configuration object for formatted output.
+        args (argparse.Namespace): Command line arguments.
+        cwd (str): Current working directory.
+        input_dir (str): Input directory path.
+        psffile (str): PSF topology file path.
+        pdbfile (str): PDB structure file path.
+        coorfile (str): Coordinate file path.
+        velfile (str): Velocity file path.
+        xscfile (str): Extended system configuration file path.
+        strfile (str): Structure file path.
+        sys_coor (mda.Universe): System structure universe.
+        n_atoms (int): Total number of atoms.
+        sys_mass (np.ndarray): System atomic masses.
+        sel_mass (np.ndarray): Selection atomic masses.
+        energy (float): Excitation energy value.
+        mode_exciter (ModeExciter): Mode exciter instance.
+    """
+
+    def __init__(self, console: ConsoleConfig, args: 'Any', cwd: str, input_dir: str,
+                 psffile: str, pdbfile: str, coorfile: Optional[str], velfile: Optional[str],
+                 xscfile: Optional[str], strfile: Optional[str], sys_coor: mda.Universe,
+                 n_atoms: int, sys_mass: np.ndarray, sel_mass: np.ndarray, energy: float,
+                 mode_exciter: 'ModeExciter',
+                 init_state: 'SystemState',
+                 platform: str = 'auto', n_threads: Optional[int] = None) -> None:
+        """
+        Initialize SimulationRunner.
+
+        Accepts a pre-built ``SystemState`` (``init_state``) so that the runner
+        is engine-agnostic: both the NAMD and OpenMM input paths produce a
+        ``SystemState`` before constructing this object, and no further
+        engine-specific I/O occurs after this point.
+
+        Args:
+            console, args, cwd, input_dir, psffile, pdbfile, coorfile, velfile,
+            xscfile, strfile, sys_coor, n_atoms, sys_mass, sel_mass, energy,
+            mode_exciter: same as before (coorfile/velfile/xscfile/strfile may
+                be None in OpenMM input mode).
+            init_state (SystemState): Pre-built initial state (positions in nm,
+                velocities in nm/ps, box vectors in nm) already rotated to the
+                canonical OpenMM box orientation.
+            platform (str): OpenMM platform ('auto', 'cuda', 'opencl', 'cpu').
+            n_threads (int): CPU thread count for the CPU platform.
+        """
+        self.console = console
+        self.args = args
+        self.cwd = cwd
+        self.input_dir = input_dir
+        self.psffile = psffile
+        self.pdbfile = pdbfile
+        self.coorfile = coorfile
+        self.velfile = velfile
+        self.xscfile = xscfile
+        self.strfile = strfile
+        self.sys_coor = sys_coor
+        self.n_atoms = n_atoms
+        self.sys_mass = sys_mass
+        self.sel_mass = sel_mass
+        self.energy = energy
+        self.mode_exciter = mode_exciter
+
+        # OpenMM platform preferences (used per-replica in run_simulation)
+        self._platform    = platform
+        self._n_threads   = n_threads
+        self._temperature = 300.0   # Kelvin
+        self._nh_frequency = getattr(args, 'nh_frequency', 1.0) # ps^-1, Nose-Hoover coupling frequency
+
+        # Consume the pre-built SystemState (already rotated to canonical form)
+        self._init_state = init_state
+
+        # Cache initial positions for diagnostics and direction correction
+        self._init_pos_nm: np.ndarray = self._init_state.positions_nm.copy()
+
+        # Build a reference MDAnalysis Universe from the initial positions.
+        # This replaces all downstream patterns of the form
+        #   mda.Universe(psffile, coorfile, format='NAMDBIN')
+        # which assumed NAMD binary input.  The reference Universe is topology
+        # + real positions; no engine-specific data is needed.
+        init_pos_ang = self._init_pos_nm * 10.0   # nm → Å
+        self._ref_universe: mda.Universe = make_reference_universe(psffile, init_pos_ang)
+
+        # Derive str_box for PME sizing.
+        # Priority:
+        #   1. Parse from .str file (NAMD mode or optional in OpenMM mode).
+        #   2. Derive from .rst box vectors via box_vectors_to_cell (OpenMM mode,
+        #      no .str supplied).
+        #   3. Fall back to None (legacy placeholder — not recommended).
+        str_box = None
+        if strfile:
+            try:
+                str_box = NAMDInputReader.parse_str_box(strfile)
+                print(
+                    f"{console.PGM_NAM}STR cell: "
+                    f"{console.EXT}{str_box['xtltype']}{console.STD}  "
+                    f"a={str_box['a']:.3f} b={str_box['b']:.3f} "
+                    f"c={str_box['c']:.3f} Ang  "
+                    f"alpha={str_box['alpha']:.2f} beta={str_box['beta']:.2f} "
+                    f"gamma={str_box['gamma']:.2f} deg"
+                )
+                # Cross-check str lengths against init_state box vectors (warn if >5%)
+                rst_lengths_nm = [float(np.linalg.norm(v))
+                                  for v in self._init_state.box_vectors_nm]
+                str_lengths_nm = [float(np.linalg.norm(v))
+                                  for v in str_box['box_vectors_nm']]
+                for lbl, rst_l, str_l in zip(('a', 'b', 'c'), rst_lengths_nm, str_lengths_nm):
+                    if rst_l > 0:
+                        diff_pct = abs(rst_l - str_l) / rst_l * 100.0
+                        if diff_pct > 5.0:
+                            print(
+                                f"{console.PGM_WRN}WARNING: STR/initial-state box mismatch "
+                                f"for {console.WRN}{lbl}{console.STD}: STR={console.WRN}{str_l*10:.3f}{console.STD} Ang, "
+                                f"state={console.WRN}{rst_l*10:.3f}{console.STD} Ang ({console.WRN}{diff_pct:.1f}{console.STD}% difference)"
+                            )
+            except Exception as exc:
+                print(f"{console.PGM_WRN}WARNING: could not parse str box "
+                      f"({console.WRN}{exc}{console.STD}); falling back to box derived from initial state.")
+                str_box = None
+
+        if str_box is None:
+            # Derive cell parameters from the initial state's box vectors.
+            # This is the primary path for OpenMM input mode when no .str is given,
+            # and also the fallback for NAMD mode when .str parsing fails.
+            a_rot, b_rot, c_rot = self._init_state.box_vectors_nm
+            try:
+                str_box = OpenMMRestartReader.box_vectors_to_cell(a_rot, b_rot, c_rot)
+                print(
+                    f"{console.PGM_NAM}Cell derived from initial state: "
+                    f"{console.EXT}{str_box['xtltype']}{console.STD}  "
+                    f"a={str_box['a']:.3f} b={str_box['b']:.3f} "
+                    f"c={str_box['c']:.3f} Ang  "
+                    f"alpha={str_box['alpha']:.2f} beta={str_box['beta']:.2f} "
+                    f"gamma={str_box['gamma']:.2f} deg"
+                )
+            except Exception as exc:
+                print(f"{console.PGM_WRN}WARNING: could not derive cell from initial state "
+                      f"({console.WRN}{exc}{console.STD}); using placeholder box (not recommended).")
+                str_box = None
+
+        # Build OpenMM System with real box dimensions from .str file
+        toppar_dir = os.path.join(input_dir, "charmm_toppar")
+        builder = OpenMMSystemBuilder(console)
+        self._psf_omm, self._omm_system, self._system_type = builder.build(
+            psffile, toppar_dir, temperature=self._temperature, str_box=str_box
+        )
+
+        # Sanity-check: OpenMM System particle count must match the PSF topology.
+        _omm_n = self._omm_system.getNumParticles()
+        _psf_n = self._psf_omm.topology.getNumAtoms()
+        if _omm_n != _psf_n:
+            raise RuntimeError(f"Atom count mismatch after system build: OpenMM system has {console.ERR}{_omm_n}{console.STD} "
+                f"particles but the PSF topology ({console.WRN}{psffile}{console.STD}) has {console.WRN}{_psf_n}{console.STD} atoms.")
+        print(f"{console.PGM_NAM}System atom count verified: "
+              f"{console.EXT}{_omm_n}{console.STD} atoms in both OpenMM system and PSF.")
+
+        # In-memory correction state (initialised per-replica)
+        self._cntrl_vec:         Optional[np.ndarray] = None  # Q vector, Å convention
+        self._exc_vel_akma:      Optional[np.ndarray] = None  # excitation velocity, AKMA
+        self._correc_ref_pos_nm: Optional[np.ndarray] = None  # RMS-displacement reference
+        self._align_ref_pos_nm:  Optional[np.ndarray] = None  # alignment reference
+        self._curr_pos_nm:       Optional[np.ndarray] = None  # positions this cycle
+        self._prev_pos_nm:       Optional[np.ndarray] = None  # positions previous cycle
+        self._avg_pos_nm:        Optional[np.ndarray] = None  # last average structure (mirrors average_{loop}.coor)
+        self._cntrl_vec_history:    List[np.ndarray] = []
+        self._exc_vel_akma_history: List[np.ndarray] = []
+
+        # Energy correction thresholds
+        self.top    = energy * 1.25
+        self.bottom = energy * 0.75
+
+        # Adaptive correction parameters
+        self.globfreq = self.cos_alpha = self.qrms_correc = 0.5
+
+        # ENM subspace tracking (used only with --recalc).  These arrays live
+        # only on the atom subset defining the ENM, typically protein C-alpha.
+        self._enm_basis_modes: Optional[np.ndarray] = None
+        self._enm_basis_ref_pos_nm: Optional[np.ndarray] = None
+
+    def _save_correction_state(self, loop: int, cnt: int) -> None:
+        """
+        Persist in-memory correction state to disk every 10 cycles.
+
+        Written files:
+          correction_state.json       — scalar state (cycle, cnt, qrms_correc)
+          _state_cntrl_vec.npy        — current Q direction vector (Å, full system)
+          _state_exc_vel_akma.npy     — current excitation velocity (AKMA, full system)
+          _state_correc_ref_pos_nm.npy— RMS-displacement reference positions (nm)
+          _state_align_ref_pos_nm.npy — Kabsch alignment reference positions (nm)
+          _state_init_pos_nm.npy      — replica initial positions used for coordinate
+                                        projection; needed to keep coor-proj.out
+                                        consistent across restarts/appends
+          _state_avg_pos_nm.npy       — most recent average-structure positions (nm);
+                                        mirrors the original correc_ref.coor / average_{loop}.coor
+                                        files so that restarts can resume the adaptive
+                                        direction-correction without re-loading NAMD binaries
+
+        Args:
+            loop (int): Current cycle number.
+            cnt (int): Correction counter.
+        """
+        np.save("_state_cntrl_vec.npy",         self._cntrl_vec)
+        np.save("_state_exc_vel_akma.npy",       self._exc_vel_akma)
+        np.save("_state_correc_ref_pos_nm.npy",  self._correc_ref_pos_nm)
+        np.save("_state_align_ref_pos_nm.npy",   self._align_ref_pos_nm)
+        np.save("_state_init_pos_nm.npy",        self._init_pos_nm)
+        # Average position is only meaningful after at least one correction step;
+        # fall back to correc_ref if not yet set separately. Use correc_ref as
+        # fallback when _avg_pos_nm is None (no correction step has fired yet).
+        avg = self._avg_pos_nm if self._avg_pos_nm is not None else self._correc_ref_pos_nm
+        np.save("_state_avg_pos_nm.npy",         avg)
+        # Persist the adaptive ENM subspace so a restart preserves continuity
+        # across the last accepted U -> V update.
+        if self._enm_basis_modes is not None:
+            np.save("_state_enm_basis_modes.npy", self._enm_basis_modes)
+        if self._enm_basis_ref_pos_nm is not None:
+            np.save("_state_enm_basis_ref_pos_nm.npy", self._enm_basis_ref_pos_nm)
+        with open("correction_state.json", 'w') as fh:
+            json.dump({'cycle': loop, 'cnt': cnt,
+                       'qrms_correc': self.qrms_correc}, fh, indent=2)
+
+    def _load_correction_state(self) -> Tuple[int, int, float]:
+        """
+        Restore in-memory correction state from disk.
+
+        Returns:
+            (loop, cnt, qrms_correc) scalar triple.
+
+        Raises:
+            FileNotFoundError: If any required file is missing.
+        """
+        self._cntrl_vec         = np.load("_state_cntrl_vec.npy")
+        self._exc_vel_akma      = np.load("_state_exc_vel_akma.npy")
+        self._correc_ref_pos_nm = np.load("_state_correc_ref_pos_nm.npy")
+        self._align_ref_pos_nm  = np.load("_state_align_ref_pos_nm.npy")
+        # Restore the replica's initial positions (used for coordinate projection).
+        if os.path.exists("_state_init_pos_nm.npy"):
+            self._init_pos_nm = np.load("_state_init_pos_nm.npy")
+        if os.path.exists("_state_avg_pos_nm.npy"):
+            try:
+                self._avg_pos_nm = np.load("_state_avg_pos_nm.npy")
+            except ValueError:
+                # Legacy file was saved as a None object array (before first
+                # correction step).  Fall back to correc_ref_pos_nm.
+                self._avg_pos_nm = self._correc_ref_pos_nm.copy()
+        if os.path.exists("_state_enm_basis_modes.npy"):
+            self._enm_basis_modes = np.load("_state_enm_basis_modes.npy")
+        if os.path.exists("_state_enm_basis_ref_pos_nm.npy"):
+            self._enm_basis_ref_pos_nm = np.load("_state_enm_basis_ref_pos_nm.npy")
+        with open("correction_state.json") as fh:
+            cs = json.load(fh)
+        return cs['cycle'], cs['cnt'], cs['qrms_correc']
+
+    def run_simulation(self, rep: int, start_loop: int, end_loop: int,
+                       correction_state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Run (or resume) an aMDeNM replica entirely within OpenMM.
+
+        All MD state lives in the OpenMM Context between cycles.
+        Per-cycle coordinate/velocity/box files are never written; the DCD
+        trajectory and OpenMM checkpoints serve as the persistent record.
+
+        Args:
+            rep (int): Replica index (1-based).
+            start_loop (int): 0 for a fresh run; last completed cycle for restart.
+            end_loop (int): Total number of cycles to reach.
+            correction_state (dict, optional): Ignored — state is loaded from disk on restart.
+
+        Returns:
+            dict with keys 'cnt' and 'qrms_correc' (backward-compat with main()).
+        """
+        rep_dir = f"{self.cwd}/rep{rep}"
+
+        # Atom selection for projections/corrections
+        if self.args.model.lower() == 'ca':
+            sel_type = self.args.selection + " and name CA"
+        else:
+            sel_type = self.args.selection + " and not name H*"
+
+        # Pre-compute selection indices and masses (constant for this replica)
+        # Use the pre-built reference Universe instead of re-reading NAMD binary.
+        _sel   = self._ref_universe.select_atoms(sel_type)
+        sel_ix: np.ndarray     = _sel.ix        # (n_sel,) system atom indices
+        sel_masses: np.ndarray = _sel.masses    # (n_sel,) amu
+        n_sel: int             = len(sel_ix)
+        del _sel
+
+        ## == NEW RUN == ##
+        if start_loop == 0:
+            if self.args.no_correc:
+                print(f"\n{self.console.PGM_NAM}{self.console.HGH}Starting Standard MDeNM "
+                      f"for {self.console.EXT}Replica {rep}{self.console.STD}")
+            elif self.args.fixed:
+                print(f"\n{self.console.PGM_NAM}{self.console.HGH}Starting Constant MDeNM "
+                      f"for {self.console.EXT}Replica {rep}{self.console.STD}")
+            else:
+                print(f"\n{self.console.PGM_NAM}{self.console.HGH}Starting Adaptive MDeNM "
+                      f"for {self.console.EXT}Replica {rep}{self.console.STD}")
+
+            os.makedirs(rep_dir, exist_ok=True)
+            os.chdir(rep_dir)
+
+            # DAVID - reinjection monitoring
+            reinjection_count = 0
+            reinjection_log = "reinjection_events.out"
+            with open(reinjection_log, "w") as f:
+                f.write(
+                    "# cycle time_ps ek_before_kcal_mol "
+                    "target_ek_kcal_mol reason\n"
+                )
+            # DAVIDEND
+
+            # Read combination vector
+            vec_file = f"{self.cwd}/rep-struct-list/rep{rep}_vector.vec"
+            shutil.copy(vec_file, "pff_vector.vec")   # traceability copy
+            q_vec_full = NAMDInputReader.read_nm_vector(self.psffile, vec_file)
+            q_vec_sel  = q_vec_full[sel_ix]           # selection subset, Å
+
+            # Compute excitation velocity (AKMA units, selection subset)
+            exc_vel_sel = self.mode_exciter.excite(q_vec_sel, self.energy, sel_masses)
+            print(f"{self.console.PGM_NAM}Writing the excitation vector with a Ek injection of {self.console.EXT}{self.energy}{self.console.STD} kcal/mol.")
+
+            #DAVID
+            # Convert AKMA to nm/ps
+            exc_vel_nm_ps = exc_vel_sel * AKMA_VEL_TO_NM_PS
+
+            # Create an independent initial state for this replica.
+            # self._init_state must remain unchanged so that every replica
+            # starts from exactly the same coordinates, velocities and box.
+            replica_state = SystemState(
+                positions_nm=self._init_state.positions_nm.copy(),
+                velocities_nm_ps=self._init_state.velocities_nm_ps.copy(),
+                box_vectors_nm=self._init_state.box_vectors_nm.copy(),
+            )
+
+            # Add this replica's excitation only to its private copy
+            replica_state.velocities_nm_ps[sel_ix] += exc_vel_nm_ps
+            #DAVIDEND
+
+            # Store full-system excitation vector (AKMA) for potential rescaling
+            self._cntrl_vec    = np.zeros((self.n_atoms, 3))
+            self._cntrl_vec[sel_ix] = q_vec_sel
+            self._exc_vel_akma = np.zeros((self.n_atoms, 3))
+            self._exc_vel_akma[sel_ix] = exc_vel_sel
+
+            # Write the combination and the excited vector
+            # cntrl_vector.vec: unit direction vector Q (used for projections each loop)
+            # excitation.vel:   velocity-scaled vector actually added to the NAMD velocities
+            self.mode_exciter._write_vector(self._cntrl_vec, "cntrl_vector.vec", self.sys_coor)
+            self.mode_exciter._write_vector(self._exc_vel_akma, "excitation.vel", self.sys_coor)
+
+            # Archive the initial Q and excitation velocity as vector set 1.
+            shutil.copy("cntrl_vector.vec", "cntrl_vector.vec.1")
+            shutil.copy("excitation.vel", "excitation.vel.1")
+
+            # Initialise position caches and correction references
+            self._curr_pos_nm       = self._init_pos_nm.copy()
+            self._prev_pos_nm       = self._init_pos_nm.copy()
+            self._correc_ref_pos_nm = self._init_pos_nm.copy()
+            self._align_ref_pos_nm  = self._init_pos_nm.copy()
+
+            # Establish the initial ENM subspace once, on the same selected
+            # atoms used for later adaptive recalculations.  This does not alter
+            # the OpenMM system; it only stores the reference basis U.
+            if (getattr(self.args, 'recalc', False)
+                    and getattr(self.args, 'recalc_method', 'random') == 'harmonized'):
+                nm_list = [int(s) for s in self.args.modes.split(',')]
+                self._initialize_enm_subspace(nm_list, sel_ix)
+
+            loop = 0
+            cnt  = 1
+            vp, ek, qp, rmsp = [], [], [], []
+
+            # Create a fresh OpenMM engine for this replica
+            engine = OpenMMSimulationEngine(
+                self.console, self._psf_omm, self._omm_system,
+                self._temperature,
+                platform_name=self._platform,
+                n_threads=self._n_threads,
+                friction_per_ps=self._nh_frequency,
+                device_index=0,          # use GPU 0 for all replicas
+                rep_num=rep,
+                is_restart=False,
+                full_ener=getattr(self.args, 'full_ener', False),
+                n_steps=getattr(self.args, 'n_steps', 50),
+            )
+            #DAVID
+            #engine.initialize_state(self._init_state)
+            engine.initialize_state(replica_state)
+            #DAVIDEND
+
+        ## == RESTART / APPEND == ##
+        else:
+            os.chdir(rep_dir)
+
+            # DAVID - reinjection monitoring on restart
+            reinjection_log = "reinjection_events.out"
+            if os.path.exists(reinjection_log):
+                with open(reinjection_log) as f:
+                    reinjection_count = sum(
+                        1 for line in f
+                        if line.strip() and not line.startswith("#")
+                    )
+            else:
+                reinjection_count = 0
+                with open(reinjection_log, "w") as f:
+                    f.write(
+                        "# cycle time_ps ek_before_kcal_mol "
+                        "target_ek_kcal_mol reason\n"
+                    )
+            # DAVIDEND
+
+            try:
+                loop, cnt, self.qrms_correc = self._load_correction_state()
+            except FileNotFoundError:
+                # Fallback: scalar-only state (legacy JSON without .npy files)
+                if correction_state and os.path.exists("correction_state.json"):
+                    with open("correction_state.json") as fh:
+                        cs = json.load(fh)
+                    cnt              = cs.get('cnt', 1)
+                    self.qrms_correc = cs.get('qrms_correc', 0.5)
+                    loop             = start_loop
+                    print(f"{self.console.PGM_WRN}No .npy state files found for "
+                          f"replica {rep}. In-memory vectors re-initialised from "
+                          f"combination file.")
+                    # Re-initialise vectors from vec file using the reference Universe
+                    vec_file = f"{self.cwd}/rep-struct-list/rep{rep}_vector.vec"
+                    q_vec_full = NAMDInputReader.read_nm_vector(self.psffile, vec_file)
+                    q_vec_sel  = q_vec_full[sel_ix]
+                    exc_vel_sel = self.mode_exciter.excite(q_vec_sel, self.energy, sel_masses)
+                    self._cntrl_vec    = np.zeros((self.n_atoms, 3))
+                    self._cntrl_vec[sel_ix] = q_vec_sel
+                    self._exc_vel_akma = np.zeros((self.n_atoms, 3))
+                    self._exc_vel_akma[sel_ix] = exc_vel_sel
+                    self._correc_ref_pos_nm = self._init_pos_nm.copy()
+                    self._align_ref_pos_nm  = self._init_pos_nm.copy()
+                else:
+                    raise RuntimeError(
+                        f"Cannot restart {self.console.ERR}Replica {rep}{self.console.STD}: correction_state.json missing."
+                    )
+
+            # DCD SYNC
+            # Read frame count directly from the DCD binary header (topology-independent)
+            # to avoid atom-count mismatch errors from mda.Universe.
+            dcd_path = f"rep{rep}.dcd"
+            if os.path.exists(dcd_path):
+                n_dcd_frames = _count_dcd_frames(dcd_path)
+                if n_dcd_frames > 0:
+                    if n_dcd_frames > loop:
+                        print(f"{self.console.PGM_NAM}DCD sync: advancing loop from "
+                              f"{self.console.WRN}{loop}{self.console.STD} to {self.console.EXT}{n_dcd_frames}{self.console.STD} "
+                              f"frames found in {self.console.EXT}{dcd_path}{self.console.STD}.")
+                        loop = n_dcd_frames
+                    else:
+                        print(f"{self.console.PGM_NAM}DCD sync: {self.console.EXT}{dcd_path}{self.console.STD} has "
+                              f"{self.console.EXT}{n_dcd_frames}{self.console.STD} frames, consistent with JSON cycle "
+                              f"{self.console.EXT}{loop}{self.console.STD}.")
+                else:
+                    print(f"{self.console.PGM_WRN}Could not read DCD header for "
+                          f"{self.console.WRN}Replica {rep}{self.console.STD} ({self.console.WRN}{dcd_path}{self.console.STD}). "
+                          f"Proceeding with JSON cycle {self.console.WRN}{loop}{self.console.STD}.")
+
+            self._curr_pos_nm = self._init_pos_nm.copy()
+            self._prev_pos_nm = self._init_pos_nm.copy()
+
+            # Reload projection lists accumulated in the previous run
+            vp, ek, qp, rmsp = [], [], [], []
+            for fname, lst_name in [
+                ("vp-proj.out",   "vp"),
+                ("ek-proj.out",   "ek"),
+                ("coor-proj.out", "qp"),
+                ("rms-proj.out",  "rmsp"),
+            ]:
+                if os.path.exists(fname):
+                    with open(fname) as fh:
+                        lines = fh.readlines()
+                    if lst_name == "vp":   vp   = lines
+                    elif lst_name == "ek": ek   = lines
+                    elif lst_name == "qp": qp   = lines
+                    else:                  rmsp = lines
+
+            if self.args.no_correc:
+                print(f"\n{self.console.PGM_NAM}{self.console.HGH}Restarting Standard MDeNM "
+                      f"for {self.console.EXT}Replica {rep}{self.console.STD}"
+                      f"{self.console.HGH} from cycle {self.console.EXT}{loop}{self.console.STD}")
+            elif self.args.fixed:
+                print(f"\n{self.console.PGM_NAM}{self.console.HGH}Restarting Constant MDeNM "
+                      f"for {self.console.EXT}Replica {rep}{self.console.STD}"
+                      f"{self.console.HGH} from cycle {self.console.EXT}{loop}{self.console.STD}")
+            else:
+                print(f"\n{self.console.PGM_NAM}{self.console.HGH}Restarting Adaptive MDeNM "
+                      f"for {self.console.EXT}Replica {rep}{self.console.STD}"
+                      f"{self.console.HGH} from cycle {self.console.EXT}{loop}{self.console.STD}")
+
+            engine = OpenMMSimulationEngine(
+                self.console, self._psf_omm, self._omm_system,
+                self._temperature,
+                platform_name=self._platform,
+                n_threads=self._n_threads,
+                friction_per_ps=self._nh_frequency,
+                device_index=0,          # use GPU 0 for all replicas
+                rep_num=rep,
+                is_restart=True,
+                full_ener=getattr(self.args, 'full_ener', False),
+                n_steps=getattr(self.args, 'n_steps', 50),
+            )
+            chk = "checkpoint.chk"
+            if not os.path.exists(chk):
+                raise FileNotFoundError(
+                    f"{chk} not found in {rep_dir}. Cannot restart replica {rep}."
+                )
+            engine.load_checkpoint(chk)
+
+            # DCD APPEND
+            # Force currentStep to exactly loop * n_steps so the reporter
+            # fires on the very first simulation.step() call of the restart.
+            _n_steps_per_cycle = getattr(self.args, 'n_steps', 50)
+            _expected_step     = loop * _n_steps_per_cycle
+            _chk_step          = engine.simulation.currentStep
+            _chk_time_ps       = engine.simulation.context.getState().getTime().value_in_unit(unit.picosecond)
+            _chk_cycle         = _chk_step // _n_steps_per_cycle
+            print(f"{self.console.PGM_NAM}Checkpoint loaded: "
+                  f"OpenMM step {_chk_step} ({_chk_time_ps:.2f} ps, "
+                  f"~cycle {_chk_cycle}); DCD/JSON cycle is {loop}.")
+            if _chk_step != _expected_step:
+                engine.simulation.currentStep = _expected_step
+
+        # ═══════════════════════════════════════════════════════════════════
+        # MAIN SIMULATION LOOP
+        # ═══════════════════════════════════════════════════════════════════
+        while loop < end_loop:
+            loop += 1
+            now = time.strftime("%H:%M:%S")
+            print(f"{self.console.PGM_NAM}{now} {self.console.EXT}Replica {rep}{self.console.STD}: running "
+                  f"{self.console.EXT}step {self.console.WRN}{loop}{self.console.STD}/{self.console.EXT}{end_loop}{self.console.STD}...")
+
+            # RUN MD CYCLE
+            pos_nm, vel_nm_ps, box_nm = engine.run_cycle(self.args.n_steps, rep=rep, loop=loop)
+
+            self._prev_pos_nm = self._curr_pos_nm.copy()
+            self._curr_pos_nm = pos_nm
+
+            # ADAPTIVE RMS / DIRECTION CHECK
+            # rms_check measures displacement along the current Q relative to
+            # the last accepted correction reference.  As in the original
+            # force-field aMDeNM algorithm, reaching the RMS gate only triggers
+            # the angular direction test.  In harmonized mode, ENM
+            # recomputation/harmonization is performed only after that angular
+            # test has actually produced a new corrected direction Qcorr.
+
+            if not self.args.no_correc and not self.args.fixed:
+                curr_sel  = self._curr_pos_nm[sel_ix]       * 10.0  # nm to Å
+                ref_sel   = self._correc_ref_pos_nm[sel_ix]  * 10.0
+
+                # Compute the difference and mass-weight the selected atoms only
+                # (qcurr - qref) * sqrt(m)
+                diff_corr   = ((curr_sel - ref_sel).T * np.sqrt(sel_masses)).T
+
+                # Read the excitation vector and expand to full-system shape
+                cntrl_sel   = self._cntrl_vec[sel_ix]
+
+                # Project the current coordinates onto Q
+                q_proj_chk  = np.sum(diff_corr * cntrl_sel)
+                rms_check   = np.sqrt((q_proj_chk ** 2) / np.sum(sel_masses))
+
+                # Adaptive direction correction / ENM recalculation
+                if rms_check >= self.qrms_correc:
+                    if hasattr(self.args, 'recalc') and self.args.recalc:
+                        nm_list = [int(s) for s in self.args.modes.split(',')]
+                        method = getattr(self.args, 'recalc_method', 'random')
+
+                        if method == 'harmonized':
+                            # Follow the original force-field aMDeNM correction
+                            # algorithm exactly up to Qcorr: the RMS gate opens
+                            # the angular test, and Q is changed only when that
+                            # angular criterion is satisfied.
+                            cnt_before = cnt
+                            cnt = self._correct_excitation_direction(
+                                rep, loop,
+                                self._cntrl_vec, cnt,
+                                sel_ix, sel_masses
+                            )
+
+                            # Harmonization is an extension of a *true* direction
+                            # correction, not an independent RMS-triggered update.
+                            # Therefore no ENM recalculation and no Q transport
+                            # occur when the angular test leaves Q unchanged.
+                            if cnt > cnt_before:
+                                self._recompute_enm_modes(
+                                    rep, loop, nm_list, cnt
+                                )
+                        else:
+                            # Historical/random ENM recalculation remains unchanged.
+                            self._recompute_enm_modes(
+                                rep, loop, nm_list, cnt
+                            )
+                            cnt += 1
+                    else:
+                        # Original non-recalc aMDeNM direction correction.
+                        cnt = self._correct_excitation_direction(
+                            rep, loop,
+                            self._cntrl_vec, cnt,
+                            sel_ix, sel_masses
+                        )
+
+                    # Update the RMS threshold after a triggered window
+                    self.qrms_correc += self.globfreq
+
+            # OBTAIN THE VELOCITIES AND KINETIC ENERGY PROJECTED ONTO Q
+            # Open the current velocities
+            vel_akma    = vel_nm_ps / AKMA_VEL_TO_NM_PS
+            vel_akma_mw = (vel_akma.T * np.sqrt(self.sys_mass)).T
+
+            # Compute the scalar projection of velocity onto Q
+            velo        = np.sum(vel_akma_mw * self._cntrl_vec)
+
+            # Compute the vectorial projection of velocity onto Q
+            v_proj_akma = self._cntrl_vec * velo
+
+            # Kinetic energy along the excitation direction
+            ek_vel      = 0.5 * np.sum(v_proj_akma ** 2)
+
+            vp.append(f"{round(velo,   5)}\n")
+            ek.append(f"{round(ek_vel, 5)}\n")
+
+            # PROJECT THE COORDINATES ONTO Q
+            # Open the current and initial coordinates
+            curr_sel_coor = self._curr_pos_nm[sel_ix] * 10.0    # nm to Å
+            init_sel_coor = self._init_pos_nm[sel_ix]  * 10.0
+
+            # Mass-weight the displacement using only the sel_type atom masses
+            diff_coor  = np.zeros((self.n_atoms, 3))
+            diff_coor[sel_ix] = ((curr_sel_coor - init_sel_coor).T * np.sqrt(sel_masses)).T
+
+            # Scalar projection of displacement onto Q and RMS displacement
+            q_proj_coor = np.sum(diff_coor * self._cntrl_vec)
+            mrms        = np.sqrt((q_proj_coor ** 2) / np.sum(sel_masses))
+            qp.append(f"{round(q_proj_coor, 5)}\n")
+            rmsp.append(f"{round(mrms,       5)}\n")
+
+            # Skip EK rescaling for standard MDeNM
+            if self.args.no_correc:
+                if loop % 10 == 0:
+                    self._save_correction_state(loop, cnt)
+                continue
+
+            # RESCALE KINETIC ENERGY ACCORDING TO VALUES PROJECTED ONTO VECTOR Q
+            # Re-excite the NM vector when ek is below the lower threshold (bottom),
+            # meaning the system has lost energy along Q (e.g. damped by friction).
+            # Reduce the injected energy when ek exceeds the upper threshold (top),
+            # preventing over-excitation that could distort the protein structure.
+            # Both thresholds are set to ±25% of the target excitation energy.
+            if (ek_vel < self.bottom) or (ek_vel > self.top):
+                # DAVID - log velocity reinjection
+                reinjection_count += 1
+                reason = "LOW" if ek_vel < self.bottom else "HIGH"
+                time_ps = loop * self.args.n_steps * 0.002
+
+                with open(reinjection_log, "a") as f:
+                    f.write(
+                        f"{loop:d} "
+                        f"{time_ps:.6f} "
+                        f"{ek_vel:.8f} "
+                        f"{self.energy:.8f} "
+                        f"{reason}\n"
+                    )
+
+                print(
+                    f"{self.console.PGM_NAM}Replica {rep}: excitation velocity "
+                    f"reinjection #{reinjection_count} at {time_ps:.3f} ps "
+                    f"(EkQ={ek_vel:.6f}, target={self.energy:.6f} kcal/mol, "
+                    f"{reason})."
+                )
+                # DAVIDEND
+
+                v_proj_akma_phys = (v_proj_akma.T / np.sqrt(self.sys_mass)).T  # Å/AKMA
+                # Compute the difference between the projected and the excitation velocities
+                # and then sum to the current velocities: Vnew = Vdyna + (VQ - Vp)
+                # This injects exactly the missing energy along Q without altering
+                # the orthogonal velocity components that drive thermal motion.
+                new_vel_akma     = vel_akma + (self._exc_vel_akma - v_proj_akma_phys)
+                engine.set_velocities(new_vel_akma * AKMA_VEL_TO_NM_PS)
+
+                # DAVID - diagnostic EkQ immediately after reinjection
+                new_vel_mw = (new_vel_akma.T * np.sqrt(self.sys_mass)).T
+                new_velo = np.sum(new_vel_mw * self._cntrl_vec)
+                new_v_proj_akma = new_velo * self._cntrl_vec
+                ek_vel_after = 0.5 * np.sum(new_v_proj_akma ** 2)
+
+                print(
+                    f"{self.console.PGM_NAM}Replica {rep}: "
+                    f"EkQ BEFORE={ek_vel:.8f} "
+                    f"IMMEDIATE_AFTER={ek_vel_after:.8f} "
+                    f"TARGET={self.energy:.8f}"
+                )
+                # DAVIDEND
+
+            if loop % 10 == 0:
+                self._save_correction_state(loop, cnt)
+
+        # Write projections into files
+        for data, tag in zip((vp, ek, qp, rmsp), ("vp", "ek", "coor", "rms")):
+            with open(f"{tag}-proj.out", 'w') as fh:
+                fh.writelines(data)
+
+        return {'cnt': cnt, 'qrms_correc': self.qrms_correc}
+
+    def _read_enm_basis(self,
+                        base_name: str,
+                        mode_numbers: List[int],
+                        rep_dir: str,
+                        sel_ix: np.ndarray | None = None) -> np.ndarray:
+        """Read ENM eigenvectors and, when requested, reduce them to the ENM atom subset.
+
+        For CA ENM, pyAdMD mode XYZ files may contain one vector for every protein
+        atom even though the ENM itself is defined only on protein C-alpha atoms.
+        In that case, ``sel_ix`` (full-system indices) is mapped to protein-local
+        indices and only the selected vectors are returned.
+
+        Returns
+        -------
+        np.ndarray
+            Array shaped (n_modes, n_selected_atoms, 3) when ``sel_ix`` is given.
+        """
+        enm_dir = os.path.join(rep_dir, f"{base_name}_enm")
+        prefix = "ca" if self.args.model.lower() == 'ca' else "heavy"
+
+        if not os.path.isdir(enm_dir):
+            raise FileNotFoundError(f"ENM directory not found: {enm_dir}")
+
+        protein_ix = np.asarray(
+            self._ref_universe.select_atoms("protein").ix,
+            dtype=int
+        )
+        protein_local = {
+            int(full_ix): local_ix
+            for local_ix, full_ix in enumerate(protein_ix)
+        }
+
+        mode_local_ix = None
+        if sel_ix is not None:
+            sel_ix = np.asarray(sel_ix, dtype=int)
+            missing = [int(ix) for ix in sel_ix if int(ix) not in protein_local]
+            if missing:
+                raise ValueError(
+                    "Some selected ENM atoms are not protein atoms; "
+                    f"first missing full-system indices: {missing[:10]}"
+                )
+            mode_local_ix = np.asarray(
+                [protein_local[int(ix)] for ix in sel_ix],
+                dtype=int
+            )
+
+        modes = []
+        for mode_num in mode_numbers:
+            fn = os.path.join(
+                enm_dir,
+                f"{base_name}_{prefix}_mode_{mode_num}.xyz"
+            )
+            if not os.path.exists(fn):
+                raise FileNotFoundError(f"ENM mode file {fn} not found")
+
+            u_mode = mda.Universe(fn, format="XYZ")
+            arr = u_mode.atoms.positions.astype(float).copy()
+            n_mode_atoms = arr.shape[0]
+
+            if sel_ix is None:
+                arr_sel = arr
+            elif n_mode_atoms == len(sel_ix):
+                arr_sel = arr
+            elif n_mode_atoms == len(protein_ix):
+                arr_sel = arr[mode_local_ix]
+            elif n_mode_atoms == self.n_atoms:
+                arr_sel = arr[sel_ix]
+            else:
+                raise ValueError(
+                    f"Unexpected number of atoms in ENM mode file {fn}: "
+                    f"{n_mode_atoms}. Expected {len(sel_ix)} selected atoms, "
+                    f"{len(protein_ix)} protein atoms, or {self.n_atoms} system atoms."
+                )
+
+            modes.append(arr_sel)
+
+        basis = np.asarray(modes, dtype=float)
+        if basis.ndim != 3 or basis.shape[-1] != 3:
+            raise RuntimeError(f"invalid ENM mode array shape: {basis.shape}")
+
+        if sel_ix is not None and basis.shape[1] != len(sel_ix):
+            raise RuntimeError(
+                f"Reduced ENM basis contains {basis.shape[1]} atoms; "
+                f"expected {len(sel_ix)}."
+            )
+
+        return basis
+
+    def _initialize_enm_subspace(self, nm_parsed: List[int], sel_ix: np.ndarray) -> None:
+        """Compute and store the initial ENM basis U on the ENM atom selection."""
+        current_pos_ang = self._curr_pos_nm * 10.0
+        base_name = "subspace_initial"
+        enm_calc = ENMCalculator(self.console)
+        enm_calc.compute_enm(
+            positions_ang=current_pos_ang,
+            base_name=base_name,
+            nm_type=self.args.model.lower(),
+            nm_parsed=nm_parsed,
+            input_dir=os.getcwd(),
+            psffile=self.psffile,
+        )
+        self._enm_basis_modes = self._read_enm_basis(
+            base_name, nm_parsed, os.getcwd(), sel_ix=sel_ix
+        )
+        if self._enm_basis_modes.shape[1] != len(sel_ix):
+            raise RuntimeError(
+                f"ENM selection mismatch: modes contain {self._enm_basis_modes.shape[1]} atoms "
+                f"but adaptive selection contains {len(sel_ix)}"
+            )
+        self._enm_basis_ref_pos_nm = self._curr_pos_nm.copy()
+        print(f"{self.console.PGM_NAM}Initial ENM subspace stored: "
+              f"{len(nm_parsed)} modes on {len(sel_ix)} selected atoms.")
+
+    def _get_subspace_search_modes(self, nm_parsed: List[int]) -> List[int]:
+        """Return the larger ENM search space M used for subspace tracking.
+
+        ``-nm/--modes`` defines the active subspace m.  The optional
+        ``--subspace-search-modes`` argument defines a larger search space M.
+        If the option is absent, M defaults to m for backward compatibility.
+        """
+        raw = getattr(self.args, "subspace_search_modes", None)
+        if raw is None or str(raw).strip() == "":
+            search_modes = list(nm_parsed)
+        else:
+            try:
+                search_modes = [int(x.strip()) for x in str(raw).split(",") if x.strip()]
+            except ValueError as exc:
+                raise ValueError(
+                    "--subspace-search-modes must be a comma-separated list of integers"
+                ) from exc
+
+        if len(search_modes) < len(nm_parsed):
+            raise ValueError(
+                f"subspace search space must satisfy M >= m; "
+                f"got M={len(search_modes)}, m={len(nm_parsed)}"
+            )
+        if len(set(search_modes)) != len(search_modes):
+            raise ValueError("--subspace-search-modes contains duplicate mode indices")
+        missing = [mode for mode in nm_parsed if mode not in search_modes]
+        if missing:
+            raise ValueError(
+                "the active modes given by -nm must be contained in "
+                f"--subspace-search-modes; missing: {missing}"
+            )
+        return search_modes
+
+    def _transport_q_through_enm_subspace(self, rep: int, loop: int,
+                                          nm_parsed: List[int],
+                                          search_modes: List[int],
+                                          cnt: int,
+                                          base_name: str,
+                                          sel_ix: np.ndarray,
+                                          sel_masses: np.ndarray) -> None:
+        """Track U_m inside V_M, harmonize it, and transport Q coherently.
+
+        ``nm_parsed`` defines the active dimension m, whereas ``search_modes``
+        defines the new ENM search space M (M >= m).
+        """
+        if self._enm_basis_modes is None or self._enm_basis_ref_pos_nm is None:
+            # Restart compatibility: establish the previous active subspace U_m
+            # at the current structure if no persisted basis is available.
+            self._initialize_enm_subspace(nm_parsed, sel_ix)
+
+        new_modes = self._read_enm_basis(
+            base_name, search_modes, os.getcwd(), sel_ix=sel_ix
+        )
+        if new_modes.shape[1] != len(sel_ix):
+            raise RuntimeError(
+                f"ENM search-space selection mismatch: modes contain {new_modes.shape[1]} atoms "
+                f"but adaptive selection contains {len(sel_ix)}"
+            )
+
+        q_old_sel = self._cntrl_vec[sel_ix]
+        alpha = float(getattr(self.args, 'subspace_alpha', 1.0))
+        if not 0.0 <= alpha <= 1.0:
+            raise ValueError(
+                f"--subspace-alpha must be between 0 and 1; got {alpha}"
+            )
+
+        result = harmonize_and_transport(
+            old_modes=self._enm_basis_modes,
+            new_modes=new_modes,
+            q_old=q_old_sel,
+            old_coords=self._enm_basis_ref_pos_nm[sel_ix] * 10.0,
+            new_coords=self._curr_pos_nm[sel_ix] * 10.0,
+            masses=sel_masses,
+            alpha=alpha,
+        )
+
+        q_full = np.zeros((self.n_atoms, 3))
+        q_full[sel_ix] = result.q_new
+        self._cntrl_vec = q_full
+
+        exc_sel = self.mode_exciter.excite(result.q_new, self.energy, sel_masses)
+        exc_full = np.zeros((self.n_atoms, 3))
+        exc_full[sel_ix] = exc_sel
+        self._exc_vel_akma = exc_full
+
+        self.mode_exciter._write_vector(q_full, "cntrl_vector.vec", self.sys_coor)
+        self.mode_exciter._write_vector(exc_full, "excitation.vel", self.sys_coor)
+
+        # This routine is reached only after a true RMS + angular correction.
+        # Archive Qfinal (after harmonization), never the intermediate Qcorr.
+        shutil.copy("cntrl_vector.vec", f"cntrl_vector.vec.{cnt}")
+        shutil.copy("excitation.vel", f"excitation.vel.{cnt}")
+
+        # The best-matching harmonized m-dimensional subspace becomes U_m
+        # for the next adaptation step, while the MD system remains unchanged.
+        self._enm_basis_modes = result.harmonized_modes.copy()
+        self._enm_basis_ref_pos_nm = self._curr_pos_nm.copy()
+
+        # Quantitative diagnostics for m -> M subspace tracking.
+        diag = "subspace_overlap.csv"
+        new_file = not os.path.exists(diag)
+        with open(diag, "a", newline="") as fh:
+            w = csv.writer(fh)
+            if new_file:
+                w.writerow([
+                    "replica", "cycle", "correction", "m", "M",
+                    "active_modes", "search_modes", "omega", "sigma",
+                    "angles_deg", "alpha"
+                ])
+            w.writerow([
+                rep, loop, cnt, len(nm_parsed), len(search_modes),
+                ";".join(str(x) for x in nm_parsed),
+                ";".join(str(x) for x in search_modes),
+                result.omega,
+                ";".join(f"{x:.8f}" for x in result.singular_values),
+                ";".join(f"{x:.5f}" for x in result.principal_angles_deg),
+                alpha
+            ])
+
+        # Coefficients of the M search modes in the m matched directions.
+        coeff_diag = "subspace_matching_coefficients.csv"
+        coeff_new_file = not os.path.exists(coeff_diag)
+        with open(coeff_diag, "a", newline="") as fh:
+            w = csv.writer(fh)
+            if coeff_new_file:
+                w.writerow([
+                    "replica", "cycle", "correction",
+                    "search_mode", "matched_direction", "coefficient"
+                ])
+            for i, mode_number in enumerate(search_modes):
+                for j in range(result.matching_coefficients.shape[1]):
+                    w.writerow([
+                        rep, loop, cnt, mode_number, j + 1,
+                        result.matching_coefficients[i, j]
+                    ])
+
+        print(
+            f"{self.console.PGM_NAM}ENM subspace transported Q at cycle {loop}: "
+            f"m={len(nm_parsed)}, M={len(search_modes)}, "
+            f"Omega={result.omega:.4f}, "
+            f"sigma_min={result.singular_values.min():.4f}, alpha={alpha:.3f}."
+        )
+
+    def _recompute_enm_modes(self, rep: int, loop: int,
+                     nm_parsed: List[int], cnt: int) -> None:
+        """Recompute ENM modes using either the random or harmonized method.
+    
+        ``--recalc-method random`` preserves the historical aMDeNM behaviour:
+        recompute only the active modes and generate a new random combination.
+    
+        ``--recalc-method harmonized`` recomputes the optional larger search
+        space M and transports Q coherently through the harmonized subspace.
+        """
+        console = ConsoleConfig()
+        now = time.strftime("%H:%M:%S")
+        method = getattr(self.args, 'recalc_method', 'random')
+    
+        if method not in ('random', 'harmonized'):
+            raise ValueError(
+                f"Unknown recalculation method {method!r}; "
+                "expected 'random' or 'harmonized'."
+            )
+    
+        if method == 'harmonized':
+            modes_to_compute = self._get_subspace_search_modes(nm_parsed)
+            print(
+                f"{self.console.PGM_NAM}{now} {self.console.EXT}Replica {rep}{self.console.STD}: "
+                f"recomputing ENM modes at step {console.EXT}{loop}{console.STD} "
+                f"[method=harmonized; active m={len(nm_parsed)}: {nm_parsed}; "
+                f"search M={len(modes_to_compute)}: {modes_to_compute}]..."
+            )
+        else:
+            modes_to_compute = list(nm_parsed)
+            print(
+                f"{self.console.PGM_NAM}{now} {self.console.EXT}Replica {rep}{self.console.STD}: "
+                f"recomputing ENM modes at step {console.EXT}{loop}{console.STD} "
+                f"[method=random; active modes={nm_parsed}]..."
+            )
+    
+        current_pos_ang = self._curr_pos_nm * 10.0
+        temp_pdb = f"step_{loop}.pdb"
+    
+        u_temp = mda.Universe(
+            self.psffile,
+            current_pos_ang[np.newaxis, :, :],
+            format="MEMORY"
+        )
+        u_temp.atoms.write(temp_pdb)
+    
+        enm_calc = ENMCalculator(self.console)
+        base_name = os.path.splitext(os.path.basename(temp_pdb))[0]
+    
+        try:
+            enm_calc.compute_enm(
+                positions_ang=current_pos_ang,
+                base_name=base_name,
+                nm_type=self.args.model.lower(),
+                nm_parsed=modes_to_compute,
+                input_dir=os.getcwd(),
+                psffile=self.psffile
+            )
+    
+            if method == 'random':
+                self._generate_new_excitation_vector(
+                    rep, loop, nm_parsed, os.getcwd(), cnt, base_name
+                )
+                # The newly generated Q starts a new adaptive reference window.
+                self._correc_ref_pos_nm = self._curr_pos_nm.copy()
+                self._align_ref_pos_nm = self._curr_pos_nm.copy()
+                print(
+                    f"{console.PGM_NAM}ENM recomputation + random mode "
+                    f"recombination completed for "
+                    f"{console.EXT}Replica {rep}{console.STD}.\n"
+                )
+            else:
+                sel_type_sub = self.args.selection
+                if self.args.model.lower() == 'ca':
+                    sel_type_sub += " and name CA"
+                else:
+                    sel_type_sub += " and not name H*"
+                sel_sub = self._ref_universe.select_atoms(sel_type_sub)
+    
+                self._transport_q_through_enm_subspace(
+                    rep, loop, nm_parsed, modes_to_compute, cnt, base_name,
+                    sel_sub.ix, sel_sub.masses
+                )
+                print(
+                    f"{console.PGM_NAM}ENM recomputation + harmonized m/M "
+                    f"subspace transport completed for "
+                    f"{console.EXT}Replica {rep}{console.STD}.\n"
+                )
+    
+        except Exception as e:
+            print(
+                f"{self.console.PGM_ERR}ENM recomputation failed "
+                f"[method={method}]: "
+                f"{self.console.ERR}{e}{self.console.STD}"
+            )
+            # For harmonized recalculation, Q has already passed through
+            # the original aMDeNM direction-correction step before entering
+            # _recompute_enm_modes().  If ENM recomputation fails, preserve
+            # that Qcorr and its correction references; do not correct twice.
+            #
+            # For the historical random method, retain the original fallback.
+            if method == 'random':
+                _u_fb = make_reference_universe(
+                    self.psffile, self._curr_pos_nm * 10.0
+                )
+                sel_type_fb = self.args.selection
+                if self.args.model.lower() == 'ca':
+                    sel_type_fb += " and name CA"
+                else:
+                    sel_type_fb += " and not name H*"
+                _sel_fb = _u_fb.atoms.select_atoms(sel_type_fb)
+                self._correct_excitation_direction(
+                    rep, loop, self._cntrl_vec, cnt,
+                    _sel_fb.ix, _sel_fb.masses
+                )
+                del _u_fb, _sel_fb
+            return
+
+        # Keep the temporary PDB as a trace of the structure used for adaptation.
+
+    def _generate_new_excitation_vector(
+            self,
+            rep: int,
+            loop: int,
+            nm_parsed: List[int],
+            rep_dir: str,
+            cnt: int,
+            base_name: str
+        ):
+        """
+        Generate a new excitation direction after ENM recomputation using the
+        historical aMDeNM random recombination method.
+
+        ENM mode files can contain all protein atoms while the active ENM
+        selection can be a reduced subset (for example C-alpha atoms).
+        _read_enm_basis() performs the required extraction before the random
+        recombination.
+        """
+        print(
+            "..:pyAdMD> Generating new random factors "
+            "for ENM recombination."
+        )
+
+        sel_type_full = self.args.selection
+        if self.args.model.lower() == "ca":
+            sel_type_full += " and name CA"
+        elif self.args.model.lower() == "heavy":
+            sel_type_full += " and not name H*"
+
+        sel_atoms = self._ref_universe.select_atoms(sel_type_full)
+        sel_ix = sel_atoms.ix
+
+        if len(sel_ix) == 0:
+            raise RuntimeError(
+                f"ENM selection '{sel_type_full}' contains no atoms."
+            )
+
+        n_modes = len(nm_parsed)
+        factors = np.random.normal(size=n_modes)
+        factor_norm = np.linalg.norm(factors)
+        if factor_norm < 1.0e-15:
+            raise RuntimeError(
+                "Random ENM recombination produced a zero coefficient vector."
+            )
+        factors /= factor_norm
+
+        basis = self._read_enm_basis(
+            base_name,
+            nm_parsed,
+            rep_dir,
+            sel_ix=sel_ix
+        )
+
+        if basis.shape[0] != n_modes:
+            raise RuntimeError(
+                "Unexpected number of ENM modes read: "
+                f"expected {n_modes}, got {basis.shape[0]}."
+            )
+        if basis.shape[1] != len(sel_ix):
+            raise RuntimeError(
+                "ENM basis/selection size mismatch: "
+                f"basis has {basis.shape[1]} atoms, "
+                f"selection has {len(sel_ix)} atoms."
+            )
+
+        comb_vec = np.tensordot(factors, basis, axes=(0, 0))
+        comb_norm = np.linalg.norm(comb_vec)
+        if comb_norm < 1.0e-15:
+            raise RuntimeError(
+                "Random ENM recombination produced a zero excitation vector."
+            )
+        comb_vec /= comb_norm
+
+        # Generate excitation velocity on the reduced ENM selection,
+        # using the same interface as the rest of SimulationRunner.
+        sel_masses = sel_atoms.masses
+        exc_sel = self.mode_exciter.excite(
+            comb_vec,
+            self.energy,
+            sel_masses
+        )
+
+        # Map both the control vector and excitation velocity
+        # back onto the full system.
+        self._cntrl_vec = np.zeros((self.n_atoms, 3), dtype=float)
+        self._cntrl_vec[sel_ix] = comb_vec
+
+        self._exc_vel_akma = np.zeros((self.n_atoms, 3), dtype=float)
+        self._exc_vel_akma[sel_ix] = exc_sel
+
+        self.mode_exciter._write_vector(
+            self._cntrl_vec,
+            "cntrl_vector.vec",
+            self.sys_coor
+        )
+        self.mode_exciter._write_vector(
+            self._exc_vel_akma,
+            "excitation.vel",
+            self.sys_coor
+        )
+
+        csv_file = os.path.join(rep_dir, "recalc_factors.csv")
+        write_header = not os.path.exists(csv_file)
+
+        with open(csv_file, "a") as fh:
+            if write_header:
+                fh.write("replica,cycle,correction,modes,factors\n")
+
+            modes_str = ";".join(str(x) for x in nm_parsed)
+            factors_str = ";".join(f"{x:.8f}" for x in factors)
+            fh.write(
+                f"{rep},{loop},{cnt},{modes_str},{factors_str}\n"
+            )
+
+        print(
+            "..:pyAdMD> Random ENM recombination completed: "
+            f"{n_modes} modes, {len(sel_ix)} selected atoms."
+        )
+
+
+    def _correct_excitation_direction(self, rep: int, loop: int,
+                                      cntrl_vec: np.ndarray, cnt: int,
+                                      sel_ix: np.ndarray,
+                                      sel_masses: np.ndarray) -> int:
+        """
+        Update the excitation vector direction based on the observed structural displacement.
+
+        Computes the mass-weighted average structure between the previous and current steps,
+        aligns it to the reference, and projects the resulting displacement onto the current
+        control vector Q. If the cosine of the angle between the displacement and Q falls
+        below the adaptive threshold (cos_alpha), the excitation direction is replaced by
+        the normalized displacement vector and the energy injection is re-applied.
+
+        This is the core aMDeNM adaptive correction step: it steers the excitation along
+        the direction the protein is actually moving, rather than persisting with the
+        original mode combination.
+
+        Args:
+            rep (int): Replica number (logging only).
+            loop (int): Current cycle number (logging only).
+            cntrl_vec (np.ndarray): Full-system Q vector (Å, shape N×3).
+            cnt (int): Correction counter; incremented when Q is replaced.
+            sel_ix (np.ndarray): Pre-computed atom indices of the selection subset.
+            sel_masses (np.ndarray): Pre-computed masses of selected atoms (amu).
+
+        Returns:
+            cnt (int): Updated correction counter.
+        """
+        n_atoms = self.sys_coor.atoms.n_atoms
+
+        # Compute the average structure of the last excitation using sel_type atoms only.
+        # Averaging two consecutive frames reduces single-step noise before alignment.
+        avg_sel_nm  = (self._curr_pos_nm[sel_ix] + self._prev_pos_nm[sel_ix]) / 2.0
+        avg_full_nm = self._curr_pos_nm.copy()
+        avg_full_nm[sel_ix] = avg_sel_nm
+        self._avg_pos_nm = avg_full_nm
+
+        # Align the averaged current structure onto the correction reference frame
+        # (Kabsch rotation) to remove rigid-body drift before computing displacement.
+        ref_positions_ang = self._align_ref_pos_nm[sel_ix] * 10.0   # nm to Å
+        avg_sel_ang       = avg_sel_nm * 10.0                       # nm to Å
+        aligned_avg_ang   = _kabsch_align(avg_sel_ang, ref_positions_ang, sel_masses)
+
+        # Mass-weighted displacement (unnormalised, selection-subset)
+        diff_sub = ((aligned_avg_ang - ref_positions_ang).T * np.sqrt(sel_masses)).T
+
+        # Full-system vector for dot-product with the full-system cntrl_vec
+        diff = np.zeros((n_atoms, 3))
+        diff[sel_ix] = diff_sub
+        norm_diff = np.linalg.norm(diff)
+
+        # Set the average structure as the new reference for the next steps
+        self._align_ref_pos_nm = avg_full_nm.copy()
+
+        if norm_diff < 1e-10:
+            return cnt   # no meaningful displacement
+
+        diff_norm = diff / norm_diff
+
+        # Project onto current control vector
+        dotp = np.sum(diff_norm * cntrl_vec)
+
+        # dotp is the cosine of the angle between the observed displacement and Q.
+        # If it falls below cos_alpha (default 0.5, i.e. >60°), the protein is moving
+        # away from the current excitation direction and a correction is needed.
+        if dotp <= self.cos_alpha:
+            # Advance the RMS-gate reference
+            self._correc_ref_pos_nm = self._curr_pos_nm.copy()
+            
+            # Preserve historical archival behaviour outside harmonized mode.
+            # In harmonized mode, only Qfinal is archived after Q transport.
+            if not (getattr(self.args, 'recalc', False) and getattr(self.args, 'recalc_method', 'random') == 'harmonized'):
+                if os.path.exists("excitation.vel"):
+                    shutil.copy("excitation.vel", f"excitation.vel.{cnt}")
+                if os.path.exists("cntrl_vector.vec"):
+                    shutil.copy("cntrl_vector.vec", f"cntrl_vector.vec.{cnt}")
+
+            # Write the corrected Q (normalised full-system vector)
+            self.mode_exciter._write_vector(diff_norm, "cntrl_vector.vec", self.sys_coor)
+            now = time.strftime("%H:%M:%S")
+            print(f"{self.console.PGM_NAM}{now} {self.console.EXT}Replica {rep}"
+                  f"{self.console.STD}: wrote corrected excitation vector "
+                  f"(cosα={dotp:.3f}, cnt={cnt}).")
+
+            # Compute new excitation velocity
+            exc_vec_sub  = self.mode_exciter.excite(diff_sub, self.energy, sel_masses)
+            exc_vec_full = np.zeros((n_atoms, 3))
+            exc_vec_full[sel_ix] = exc_vec_sub
+            self.mode_exciter._write_vector(exc_vec_full, "excitation.vel", self.sys_coor)
+
+            # Update in-memory state; EK-rescaling in the main loop will inject
+            # the new velocity into the OpenMM Context on the next out-of-band cycle.
+            self._cntrl_vec    = diff_norm.copy()
+            self._exc_vel_akma = exc_vec_full.copy()
+
+            cnt += 1                # advance the correction counter
+            self.qrms_correc = 0    # reset threshold window
+
+        return cnt

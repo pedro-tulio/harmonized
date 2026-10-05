@@ -1,0 +1,148 @@
+===== pyAdMD distribution validation =====
+DATE       : Tue Sep 15 22:24:35 CEST 2026
+HOST       : c23gpu1
+DIST       : /home/2022004/dperah02/GRESH/PMI/1pmi-capmi/1pmi-md/pyaMDeNM/pyAdMD-extcollect/openmm-gpu/pyadmd-distrib
+PYTHONPATH : /home/2022004/dperah02/GRESH/PMI/1pmi-capmi/1pmi-md/pyaMDeNM/pyAdMD-extcollect/openmm-gpu/pyadmd-distrib/src
+pyadmd   = /home/2022004/dperah02/GRESH/PMI/1pmi-capmi/1pmi-md/pyaMDeNM/pyAdMD-extcollect/openmm-gpu/pyadmd-distrib/src/pyadmd/__init__.py
+runner   = /home/2022004/dperah02/GRESH/PMI/1pmi-capmi/1pmi-md/pyaMDeNM/pyAdMD-extcollect/openmm-gpu/pyadmd-distrib/src/pyadmd/simulation/runner.py
+subspace = /home/2022004/dperah02/GRESH/PMI/1pmi-capmi/1pmi-md/pyaMDeNM/pyAdMD-extcollect/openmm-gpu/pyadmd-distrib/src/pyadmd/modes/subspace.py
+
+[5;36m
+                            █████████       █████ ██████   ██████ ██████████
+                           ███░░░░░███     ░░███ ░░██████ ██████ ░░███░░░░███
+     ████████  █████ ████ ░███    ░███   ███████  ░███░█████░███  ░███   ░░███
+    ░░███░░███░░███ ░███  ░███████████  ███░░███  ░███░░███ ░███  ░███    ░███
+     ░███ ░███ ░███ ░███  ░███░░░░░███ ░███ ░███  ░███ ░░░  ░███  ░███    ░███
+     ░███ ░███ ░███ ░███  ░███    ░███ ░███ ░███  ░███      ░███  ░███    ███
+     ░███████  ░░███████  █████   █████░░████████ █████     █████ ██████████
+     ░███░░░    ░░░░░███ ░░░░░   ░░░░░  ░░░░░░░░ ░░░░░     ░░░░░ ░░░░░░░░░░
+     ░███       ███ ░███
+     █████     ░░██████
+    ░░░░░       ░░░░░░
+    [0m
+		[2;106mAdaptive Molecular Dynamics with Python[0m
+			     version: 3.2.2
+
+  Please cite:
+
+    	Adaptive Normal Mode Sampling (aMDeNM) Enhances Exploration of Protein Conformational Space
+    	and Reveals the Functional Role of Frequency Coupling.
+    	P.T. Resende-Lara, M.G.S. Costa, B. Dudas, J. Czigleczki, E. Balog, D. Perahia.
+    	J. Chem. Theory Comput. 14 July 2026; 22 (13): 6304–6321. https://doi.org/10.1021/acs.jctc.6c00398
+
+
+The Adaptive Molecular Dynamics with Excited Normal Modes (aMDeNM) method applies a kinetic excitation of normal modes (NMs)
+to enhance molecular dynamics simulations sampling. This technique consists in injecting additional atomic velocities along
+uniformily distributed combinations of NM vectors, creating an effective coupling between slow and fast molecular motions.
+The motions described by preselected directions of low-frequency NMs are dynamically adjusted throughout the simulation.
+By coupling low-frequency NM excitation with adaptive directional adjustments, aMDeNM facilitates extensive exploration of
+the energy landscape, overcoming the constraints of fixed, rectilinear displacements and alleviating structural stresses and
+environmental resistance. Importantly, aMDeNM requires only an initial structure without the need to specify predefined
+target states, distinguishing it from many biased sampling techniques that rely on predefined target conformations.
+
+..:[32mpyAdMD> [0m[2;106mSetup and run aMDeNM simulations[0m
+
+..:[32mpyAdMD> [0mBundled [32mcharmm_toppar.zip[0m copied to [32minputs/[0m.
+..+[33mpyAdMD-Wrn> [0mFile [33mstep3_pbcsetup.psf[0m was copied to inputs folder.
+..+[33mpyAdMD-Wrn> [0mFile [33mstep5_1.pdb[0m was copied to inputs folder.
+..+[33mpyAdMD-Wrn> [0mFile [33mequil-final.xml[0m was copied to inputs folder.
+..+[33mpyAdMD-Wrn> [0mFile [33mstep3_input.str[0m was copied to inputs folder.
+..:[32mpyAdMD> [0mReading OpenMM restart file: [32mequil-final.xml[0m...
+..:[32mpyAdMD> [0mReference state saved to [32minputs/init_reference_*.npy[0m.
+
+..:[32mpyAdMD> [0m[1;100mComputing [32mCα ENM[0m[1;100m and writing normal mode vectors [32m7,8,9[0m.
+..:[32mpyAdMD> [0mSelection '[32mprotein[0m' matched [32m6855[0m atoms (of [32m6855[0m total).
+..:[32mpyAdMD> [0mSelected [32m440[0m Cα atoms.
+..:[32mpyAdMD> [0mAdded [32m11820[0m ENM bonds with cutoff=[32m15.0[0m Å, min_distance=[32m0.29[0m Å, k=[32m1.0[0m kcal/mol/Å².
+..:[32mpyAdMD> [0mCα structure saved to [32m/home/2022004/dperah02/GRESH/PMI/1pmi-capmi/1pmi-md/pyaMDeNM/pyAdMD-extcollect/openmm-gpu/pyadmd-distrib/examples/1pmi/run-enm-simple/inputs/equil-final_enm/equil-final_ca_structure.pdb[0m.
+..:[32mpyAdMD> [0mComputing sparse Hessian for [32m440[0m particles ([32m11820[0m bonds)...
+..:[32mpyAdMD> [0mSparse Hessian: [32m216,720[0m non-zeros ([32m12.438%[0m density).
+..:[32mpyAdMD> [0mENM Hessian computed in [32m0.18[0m seconds.
+..:[32mpyAdMD> [0mDiagonalizing sparse mass-weighted Hessian...
+..:[32mpyAdMD> [0mDiagonalization completed in [32m0.14[0m seconds.
+..:[32mpyAdMD> [0mWriting vectors and trajectories for modes [32m7, 8, 9[0m...
+..:[32mpyAdMD> [0mResults saved to [32m/home/2022004/dperah02/GRESH/PMI/1pmi-capmi/1pmi-md/pyaMDeNM/pyAdMD-extcollect/openmm-gpu/pyadmd-distrib/examples/1pmi/run-enm-simple/inputs/equil-final_enm/equil-final_ca_*.npy[0m files.
+
+..:[32mpyAdMD> [0mGenerating [32m1[0m uniformly distributed combinations of modes [32m7,8,9[0m (seed=[32m42[0m).
+..:[32mpyAdMD> [0mConverged after [33m1[0m iterations.
+..:[32mpyAdMD> [0mCombination factors written at [32m/home/2022004/dperah02/GRESH/PMI/1pmi-capmi/1pmi-md/pyaMDeNM/pyAdMD-extcollect/openmm-gpu/pyadmd-distrib/examples/1pmi/run-enm-simple/rep-struct-list/factors.csv[0m.
+..:[32mpyAdMD> [0mCombination vectors written at [32m/home/2022004/dperah02/GRESH/PMI/1pmi-capmi/1pmi-md/pyaMDeNM/pyAdMD-extcollect/openmm-gpu/pyadmd-distrib/examples/1pmi/run-enm-simple/rep-struct-list/rep*_vector.vec[0m.
+
+..:[32mpyAdMD> [0mParameters saved to [32mpyAdMD_params.json[0m.
+..:[32mpyAdMD> [0mSTR cell: [32mcubic[0m  a=102.000 b=102.000 c=102.000 Ang  alpha=90.00 beta=90.00 gamma=90.00 deg
+Added Zn coordination restraints: Zn=6855, ligands=[1730, 1758, 2141, 4470], r0=2.1 A, k=120 kcal/mol/A^2
+0 HarmonicBondForce
+1 HarmonicAngleForce
+2 HarmonicBondForce
+3 PeriodicTorsionForce
+4 CustomTorsionForce
+5 CMAPTorsionForce
+6 NonbondedForce
+7 CustomNonbondedForce
+8 CMMotionRemover
+9 HarmonicBondForce
+HarmonicBondForce 0 nbonds = 69107
+HarmonicBondForce 2 nbonds = 6089
+HarmonicBondForce 9 nbonds = 4
+Zn restraint: 6855 1730 0.21000000000000002 nm 50208.00000000001 kJ/(nm**2 mol)
+Zn restraint: 6855 1758 0.21000000000000002 nm 50208.00000000001 kJ/(nm**2 mol)
+Zn restraint: 6855 2141 0.21000000000000002 nm 50208.00000000001 kJ/(nm**2 mol)
+Zn restraint: 6855 4470 0.21000000000000002 nm 50208.00000000001 kJ/(nm**2 mol)
+..:[32mpyAdMD> [0mOpenMM system built: [32m100319[0m atoms, type=[32mglobular[0m.
+..:[32mpyAdMD> [0mSystem atom count verified: [32m100319[0m atoms in both OpenMM system and PSF.
+
+..:[32mpyAdMD> [0m[1;100mStarting Adaptive MDeNM for [32mReplica 1[0m
+..:[32mpyAdMD> [0mWriting the excitation vector with a Ek injection of [32m2.0[0m kcal/mol.
+..:[32mpyAdMD> [0mOpenMM platform: [32mCUDA[0m.
+..:[32mpyAdMD> [0m22:24:57 [32mReplica 1[0m: running [32mstep [33m1[0m/[32m10[0m...
+..:[32mpyAdMD> [0mReplica 1: excitation velocity reinjection #1 at 0.100 ps (EkQ=0.061529, target=2.000000 kcal/mol, LOW).
+..:[32mpyAdMD> [0mReplica 1: EkQ BEFORE=0.06152863 IMMEDIATE_AFTER=1.99999999 TARGET=2.00000000
+..:[32mpyAdMD> [0m22:24:59 [32mReplica 1[0m: running [32mstep [33m2[0m/[32m10[0m...
+..:[32mpyAdMD> [0mReplica 1: excitation velocity reinjection #2 at 0.200 ps (EkQ=0.003795, target=2.000000 kcal/mol, LOW).
+..:[32mpyAdMD> [0mReplica 1: EkQ BEFORE=0.00379481 IMMEDIATE_AFTER=1.99999999 TARGET=2.00000000
+..:[32mpyAdMD> [0m22:25:00 [32mReplica 1[0m: running [32mstep [33m3[0m/[32m10[0m...
+..:[32mpyAdMD> [0mReplica 1: excitation velocity reinjection #3 at 0.300 ps (EkQ=0.055548, target=2.000000 kcal/mol, LOW).
+..:[32mpyAdMD> [0mReplica 1: EkQ BEFORE=0.05554751 IMMEDIATE_AFTER=1.99999999 TARGET=2.00000000
+..:[32mpyAdMD> [0m22:25:00 [32mReplica 1[0m: running [32mstep [33m4[0m/[32m10[0m...
+..:[32mpyAdMD> [0mReplica 1: excitation velocity reinjection #4 at 0.400 ps (EkQ=0.330376, target=2.000000 kcal/mol, LOW).
+..:[32mpyAdMD> [0mReplica 1: EkQ BEFORE=0.33037629 IMMEDIATE_AFTER=1.99999999 TARGET=2.00000000
+..:[32mpyAdMD> [0m22:25:01 [32mReplica 1[0m: running [32mstep [33m5[0m/[32m10[0m...
+..:[32mpyAdMD> [0mReplica 1: excitation velocity reinjection #5 at 0.500 ps (EkQ=0.453771, target=2.000000 kcal/mol, LOW).
+..:[32mpyAdMD> [0mReplica 1: EkQ BEFORE=0.45377143 IMMEDIATE_AFTER=1.99999999 TARGET=2.00000000
+..:[32mpyAdMD> [0m22:25:02 [32mReplica 1[0m: running [32mstep [33m6[0m/[32m10[0m...
+..:[32mpyAdMD> [0mReplica 1: excitation velocity reinjection #6 at 0.600 ps (EkQ=0.000783, target=2.000000 kcal/mol, LOW).
+..:[32mpyAdMD> [0mReplica 1: EkQ BEFORE=0.00078263 IMMEDIATE_AFTER=1.99999999 TARGET=2.00000000
+..:[32mpyAdMD> [0m22:25:02 [32mReplica 1[0m: running [32mstep [33m7[0m/[32m10[0m...
+..:[32mpyAdMD> [0mReplica 1: excitation velocity reinjection #7 at 0.700 ps (EkQ=0.335492, target=2.000000 kcal/mol, LOW).
+..:[32mpyAdMD> [0mReplica 1: EkQ BEFORE=0.33549200 IMMEDIATE_AFTER=1.99999999 TARGET=2.00000000
+..:[32mpyAdMD> [0m22:25:03 [32mReplica 1[0m: running [32mstep [33m8[0m/[32m10[0m...
+..:[32mpyAdMD> [0mReplica 1: excitation velocity reinjection #8 at 0.800 ps (EkQ=0.175514, target=2.000000 kcal/mol, LOW).
+..:[32mpyAdMD> [0mReplica 1: EkQ BEFORE=0.17551443 IMMEDIATE_AFTER=1.99999999 TARGET=2.00000000
+..:[32mpyAdMD> [0m22:25:03 [32mReplica 1[0m: running [32mstep [33m9[0m/[32m10[0m...
+..:[32mpyAdMD> [0mReplica 1: excitation velocity reinjection #9 at 0.900 ps (EkQ=1.349243, target=2.000000 kcal/mol, LOW).
+..:[32mpyAdMD> [0mReplica 1: EkQ BEFORE=1.34924336 IMMEDIATE_AFTER=1.99999999 TARGET=2.00000000
+..:[32mpyAdMD> [0m22:25:04 [32mReplica 1[0m: running [32mstep [33m10[0m/[32m10[0m...
+..:[32mpyAdMD> [0mReplica 1: excitation velocity reinjection #10 at 1.000 ps (EkQ=2.981756, target=2.000000 kcal/mol, HIGH).
+..:[32mpyAdMD> [0mReplica 1: EkQ BEFORE=2.98175594 IMMEDIATE_AFTER=2.00000000 TARGET=2.00000000
+
+===== TEST COMPLETED =====
+Tue Sep 15 22:25:06 CEST 2026
+
+########################################
+   Comptabilité du calcul 3230950 
+########################################
+$ sacct --format='JobID,Partition,JobName,MaxRSS,MaxVMSize,NTasks,AllocCPUS,Start,End,Elapsed,AveCPU,MinCPU,NNodes,ExitCode,State' -j 3230950
+JobID           Partition  JobName             MaxRSS   MaxVMSize  NTasks  AllocCPUS  Start                End                  Elapsed   AveCPU  MinCPU  NNodes  ExitCode  State      
+-----           ---------  -------             -------  ---------  ------  ---------  -----                ---                  -------   ------  ------  ------  --------  -----      
+3230950         gpu_debug  pyadmd-dist-simple                              2          2026-09-15T22:24:33  2026-09-15T22:25:06  00:00:33                  1       0:0       COMPLETED  
+3230950.batch              batch                                   1       2          2026-09-15T22:24:33  2026-09-15T22:25:06  00:00:33                  1       0:0       COMPLETED  
+3230950.extern             extern                                  1       2          2026-09-15T22:24:33  2026-09-15T22:25:06  00:00:33                  1       0:0       COMPLETED  
+
+$ sacct --format='JobID,JobName,AllocCPUS,ReqTRES,AllocTRES,NNodes,NodeList,Elapsed,CPUTime' -j 3230950
+JobID           JobName             AllocCPUS  ReqTRES                                    AllocTRES                                                  NNodes  NodeList  Elapsed   CPUTime   
+-----           -------             ---------  -------                                    ---------                                                  ------  --------  -------   -------   
+3230950         pyadmd-dist-simple  2          billing=8,cpu=2,gres/gpu=1,mem=32G,node=1  billing=8,cpu=2,gres/gpu:a100=1,gres/gpu=1,mem=32G,node=1  1       c23gpu1   00:00:33  00:01:06  
+3230950.batch   batch               2                                                     cpu=2,gres/gpu:a100=1,gres/gpu=1,mem=32G,node=1            1       c23gpu1   00:00:33  00:01:06  
+3230950.extern  extern              2                                                     billing=8,cpu=2,gres/gpu:a100=1,gres/gpu=1,mem=32G,node=1  1       c23gpu1   00:00:33  00:01:06  
+
+Pour plus d'informations sur la comptabilité du calcul, merci de consulter la documentation http://www-tech.criann.fr ou le manuel 'man sacct'

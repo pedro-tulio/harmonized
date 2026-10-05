@@ -1,0 +1,369 @@
+Metadata-Version: 2.4
+Name: pyadmd
+Version: 3.2.2
+Summary: Adaptive Molecular Dynamics with Excited Normal Modes (aMDeNM) on OpenMM.
+Author-email: Pedro Túlio Resende-Lara <laraptr@unicamp.br>
+License-Expression: GPL-3.0-or-later
+Project-URL: Repository, https://github.com/pedro-tulio/pyadmd
+Keywords: molecular dynamics,normal modes,aMDeNM,OpenMM,enhanced sampling
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Intended Audience :: Science/Research
+Classifier: Topic :: Scientific/Engineering :: Bio-Informatics
+Classifier: Topic :: Scientific/Engineering :: Chemistry
+Requires-Python: >=3.12
+Description-Content-Type: text/markdown
+Requires-Dist: numpy>=2.2.5
+Requires-Dist: scipy>=1.16.0
+Requires-Dist: mdanalysis>=2.9.0
+Requires-Dist: matplotlib>=3.10.0
+Requires-Dist: seaborn
+Requires-Dist: pandas
+Requires-Dist: openmm[cuda12]>=8.3.1
+Requires-Dist: numba>=0.61.2
+Requires-Dist: biopython
+Requires-Dist: cupy-cuda12x>=13.6
+
+# pyAdMD 3.2.2
+
+
+**pyAdMD** implements Adaptive Molecular Dynamics with Excited Normal Modes
+(aMDeNM) using OpenMM for molecular dynamics propagation.
+
+The program combines molecular dynamics with excitation along low-frequency
+normal-mode directions to enhance exploration of protein conformational space.
+
+Version **3.2.2** supports both precomputed CHARMM/PFF normal modes and
+Elastic Network Model (ENM) modes, including adaptive ENM recomputation and
+harmonized normal-mode subspace transport.
+
+## Main features
+
+- OpenMM molecular dynamics engine
+- Nose-Hoover thermostat
+- Multiple independent replicas
+- Excitation along combinations of normal modes
+- User-defined excitation kinetic energy
+- CHARMM/PFF precomputed normal modes
+- C-alpha and heavy-atom ENM modes
+- Adaptive ENM recomputation
+- Simple random recombination after ENM recomputation
+- Harmonized normal-mode subspace transport
+- Reproducible mode combinations through a random seed
+- Analysis and free-energy modules
+
+## Installation
+
+pyAdMD requires Python 3.12 or later.
+
+From the source directory:
+
+    pip install -e .
+
+The main command is:
+
+    pyadmd
+
+For help:
+
+    pyadmd --help
+    pyadmd run --help
+
+Python dependencies are declared in `pyproject.toml`.
+
+CHARMM is additionally required when using precomputed CHARMM/PFF
+normal modes.
+
+
+## Normal-mode methods
+
+### CHARMM/PFF modes
+
+Precomputed CHARMM/PFF normal modes are selected with:
+
+    -m CHARMM
+    -mod modes.mod
+
+Example:
+
+    pyadmd run \
+      -src OPENMM \
+      -psf system.psf \
+      -pdb system.pdb \
+      -rst equil-final.xml \
+      -str parameters.str \
+      -m CHARMM \
+      -mod modes.mod \
+      -nm 7,8,9 \
+      -sel "protein or name ZN" \
+      -ek 2 \
+      -t 1 \
+      -rep 1
+
+The bundled CHARMM driver `wrt-nm.mdu` extracts the requested modes
+and converts them to vectors readable by pyAdMD.
+
+### ENM modes
+
+C-alpha ENM calculations are selected with:
+
+    -m CA
+
+Heavy-atom ENM calculations are selected with:
+
+    -m HEAVY
+
+Example:
+
+    pyadmd run \
+      -src OPENMM \
+      -psf system.psf \
+      -pdb system.pdb \
+      -rst equil-final.xml \
+      -str parameters.str \
+      -m CA \
+      -nm 7,8,9 \
+      -ek 2 \
+      -t 10 \
+      -rep 1
+
+## Adaptive ENM recomputation
+
+For ENM modes, the `-r` option enables recomputation of the ENM basis
+as the molecular conformation evolves.
+
+Two recomputation strategies are available.
+
+### Simple recombination
+
+    --recalc-method simple
+
+This is the historical behavior. After ENM recomputation, a new random
+normalized combination of the selected modes is generated.
+
+### Harmonized subspace transport
+
+    --recalc-method harmonized
+
+The harmonized method preserves the excitation direction as coherently
+as possible when the ENM basis changes.
+
+Two mode spaces are distinguished:
+
+- **m**: active excitation subspace, specified by `-nm`
+- **M**: larger search subspace, specified by `--subspace-search-modes`
+
+Example:
+
+    -nm 7,8,9 \
+    --subspace-search-modes 7,8,9,10,11,12 \
+    --recalc-method harmonized \
+    -r
+
+Here:
+
+    m = {7,8,9}
+    M = {7,8,9,10,11,12}
+
+At ENM recomputation, the new active subspace is identified within
+the larger search space and the excitation direction Q is transported
+into the new basis.
+
+Diagnostics are written to `subspace_overlap.csv`, including:
+
+- active dimension m
+- search dimension M
+- active and search mode numbers
+- subspace overlap Omega
+- singular values
+- principal angles
+- transport parameter alpha
+
+In version 3.2.2, the harmonized transport parameter is currently:
+
+    alpha = 1.0
+
+corresponding to full transport of the previous excitation direction.
+
+
+## Excitation energy
+
+The target kinetic energy associated with the excitation direction is
+specified with:
+
+    -ek KCAL_PER_MOL
+
+For example:
+
+    -ek 2
+
+requests a target excitation energy of 2 kcal/mol.
+
+During the simulation, pyAdMD monitors the kinetic energy projected
+along the excitation direction and reinjects excitation velocity when
+required.
+
+## Replicas and reproducibility
+
+The number of replicas is controlled with:
+
+    -rep N
+
+The initial distribution of mode combinations can be reproduced with:
+
+    -seed INTEGER
+
+For example:
+
+    -rep 24 -seed 42
+
+## 1PMI validation example
+
+The distribution contains a validation example under:
+
+    examples/1pmi/
+
+Three execution paths have been tested successfully with this system:
+
+1. ENM with simple recombination
+2. ENM with harmonized m/M subspace transport
+3. CHARMM/PFF normal modes
+
+The corresponding scripts are:
+
+    run-enm-simple.sh
+    run-enm-harmonized.sh
+    run-pff-charmm.sh
+
+### ENM-simple validation
+
+The ENM-simple calculation was successfully run from the clean
+`pyadmd-distrib` source tree using modes 7,8,9.
+
+### ENM-harmonized validation
+
+The harmonized validation used:
+
+    m = {7,8,9}
+    M = {7,8,9,10,11,12}
+    alpha = 1.0
+
+An actual ENM recomputation and harmonized subspace transport occurred
+during the validation trajectory.
+
+For the first correction, the diagnostics were:
+
+    correction = 1
+    Omega = 0.995041
+    singular values = 0.998835, 0.997023, 0.996693
+    principal angles = 2.76591, 4.42192, 4.66122 degrees
+    alpha = 1.0
+
+This confirms that ENM recomputation, m/M subspace harmonization and
+transport of Q were executed successfully.
+
+### CHARMM/PFF validation
+
+The CHARMM/PFF calculation was successfully run using precomputed
+modes 7,8,9 from the 1PMI mode file.
+
+The CHARMM extraction generated:
+
+    mode_nm7.crd
+    mode_nm8.crd
+    mode_nm9.crd
+
+For the current 1PMI workflow, the mode vectors contain 6856 atoms:
+
+    6855 protein atoms + 1 Zn atom
+
+The resulting mode combination was successfully used for the OpenMM
+aMDeNM trajectory.
+
+## Current limitations and future developments
+
+### Atomic selection for CHARMM/PFF modes
+
+The current 1PMI CHARMM/PFF workflow explicitly retains the protein
+and the Zn ion.
+
+The bundled historical `wrt-nm.mdu` currently uses the CHARMM
+selection:
+
+    PRO* .or. HET*
+
+The corresponding Python CHARMM-mode path currently uses:
+
+    protein or name ZN
+
+This preserves the validated behavior for the 1PMI test system, but
+it is not intended as a general solution for arbitrary metal ions,
+ligands or cofactors.
+
+A future version should use a single user-defined atomic selection,
+specified from the command line or Slurm script, and propagate it
+consistently through the complete workflow:
+
+    user selection
+        -> CHARMM/PFF mode extraction
+        -> mode-vector construction
+        -> mode combination
+        -> excitation-vector construction
+        -> velocity excitation
+
+This will remove the current hard-coded Zn-specific behavior and
+allow the same program to be used consistently with other ions,
+ligands and cofactors.
+
+### ENM treatment of non-protein atoms
+
+The current ENM implementation is primarily protein based.
+
+General support for metal ions, ligands and cofactors in the ENM
+basis is planned for a future version.
+
+### Harmonization parameter
+
+The harmonized subspace transport currently uses:
+
+    alpha = 1.0
+
+Systematic investigation of partial or adaptive transport values will
+be performed in future work.
+
+### Historical CHARMM setting
+
+The bundled `wrt-nm.mdu` currently contains the historical setting:
+
+    vibran nmod 406
+
+This value has been retained in version 3.2.2 to preserve the
+validated CHARMM/PFF workflow. Its role should be reviewed before
+future generalization.
+
+### Diagnostic excitation-energy output
+
+Version 3.2.2 currently contains additional diagnostic output of the
+form:
+
+    EkQ BEFORE=... IMMEDIATE_AFTER=... TARGET=...
+
+This diagnostic is retained during the present validation phase.
+It may later be removed or controlled through a debug/verbose option.
+
+## Citation
+
+If pyAdMD/aMDeNM is used in scientific work, please cite the relevant
+aMDeNM methodology publications.
+
+Adaptive Normal Mode Sampling (aMDeNM) Enhances Exploration of Protein
+Conformational Space and Reveals the Functional Role of Frequency Coupling.
+
+P. T. Resende-Lara et al.
+Journal of Chemical Theory and Computation, 2026, 22(13), 6304-6321.
+
+DOI: 10.1021/acs.jctc.6c00398
+
+## License
+
+GPL-3.0-or-later

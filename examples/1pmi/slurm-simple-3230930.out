@@ -1,0 +1,28 @@
+===== pyAdMD distribution validation =====
+DATE       : Tue Sep 15 22:13:35 CEST 2026
+HOST       : c23gpu1
+DIST       : /var/spool
+PYTHONPATH : /var/spool/src
+pyadmd   = /home/2022004/dperah02/GRESH/PMI/1pmi-capmi/1pmi-md/pyaMDeNM/pyAdMD-extcollect/openmm-gpu/pyadmd/src/pyadmd/__init__.py
+runner   = /home/2022004/dperah02/GRESH/PMI/1pmi-capmi/1pmi-md/pyaMDeNM/pyAdMD-extcollect/openmm-gpu/pyadmd/src/pyadmd/simulation/runner.py
+subspace = /home/2022004/dperah02/GRESH/PMI/1pmi-capmi/1pmi-md/pyaMDeNM/pyAdMD-extcollect/openmm-gpu/pyadmd/src/pyadmd/modes/subspace.py
+
+
+########################################
+   Comptabilité du calcul 3230930 
+########################################
+$ sacct --format='JobID,Partition,JobName,MaxRSS,MaxVMSize,NTasks,AllocCPUS,Start,End,Elapsed,AveCPU,MinCPU,NNodes,ExitCode,State' -j 3230930
+JobID           Partition  JobName             MaxRSS   MaxVMSize  NTasks  AllocCPUS  Start                End                  Elapsed   AveCPU  MinCPU  NNodes  ExitCode  State      
+-----           ---------  -------             -------  ---------  ------  ---------  -----                ---                  -------   ------  ------  ------  --------  -----      
+3230930         gpu_debug  pyadmd-dist-simple                              2          2026-09-15T22:13:33  2026-09-15T22:13:36  00:00:03                  1       127:0     FAILED     
+3230930.batch              batch                                   1       2          2026-09-15T22:13:33  2026-09-15T22:13:36  00:00:03                  1       127:0     FAILED     
+3230930.extern             extern                                  1       2          2026-09-15T22:13:33  2026-09-15T22:13:36  00:00:03                  1       0:0       COMPLETED  
+
+$ sacct --format='JobID,JobName,AllocCPUS,ReqTRES,AllocTRES,NNodes,NodeList,Elapsed,CPUTime' -j 3230930
+JobID           JobName             AllocCPUS  ReqTRES                                    AllocTRES                                                  NNodes  NodeList  Elapsed   CPUTime   
+-----           -------             ---------  -------                                    ---------                                                  ------  --------  -------   -------   
+3230930         pyadmd-dist-simple  2          billing=8,cpu=2,gres/gpu=1,mem=32G,node=1  billing=8,cpu=2,gres/gpu:a100=1,gres/gpu=1,mem=32G,node=1  1       c23gpu1   00:00:03  00:00:06  
+3230930.batch   batch               2                                                     cpu=2,gres/gpu:a100=1,gres/gpu=1,mem=32G,node=1            1       c23gpu1   00:00:03  00:00:06  
+3230930.extern  extern              2                                                     billing=8,cpu=2,gres/gpu:a100=1,gres/gpu=1,mem=32G,node=1  1       c23gpu1   00:00:03  00:00:06  
+
+Pour plus d'informations sur la comptabilité du calcul, merci de consulter la documentation http://www-tech.criann.fr ou le manuel 'man sacct'

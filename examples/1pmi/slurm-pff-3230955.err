@@ -1,0 +1,22 @@
+load py_env/miniconda3/25.7.0 environment (rh9)
+Unloading the cpe module is insufficient to restore the system defaults.
+Please run 'source
+/opt/cray/pe/cpe/24.07/restore_lmod_system_defaults.[csh|sh]'. 
+remove gcc/13.2 - cray-mpich/8.1.30 - milan - cpe 24.07
+load gcc/13.2 - cray-mpich/8.1.30 - milan - cpe 24.07
+load math/mkl/2025.0/lp64/blas-lapack_gcc environment (rh9)
+load py_env/python/3.11.7 environment (rh9)
+load atomic_simu/charmm/c50b2 environment
+Traceback (most recent call last):
+  File "/home/2022004/dperah02/.conda/envs/pyadmd-openmm/bin/pyadmd", line 6, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/home/2022004/dperah02/GRESH/PMI/1pmi-capmi/1pmi-md/pyaMDeNM/pyAdMD-extcollect/openmm-gpu/pyadmd-distrib/src/pyadmd/cli/main.py", line 62, in main
+    cmd_run(args, console, cwd, input_dir, enm_calculator, mode_exciter, param_storage)
+  File "/home/2022004/dperah02/GRESH/PMI/1pmi-capmi/1pmi-md/pyaMDeNM/pyAdMD-extcollect/openmm-gpu/pyadmd-distrib/src/pyadmd/cli/commands.py", line 214, in cmd_run
+    factors = mode_exciter.generate_factors(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/2022004/dperah02/GRESH/PMI/1pmi-capmi/1pmi-md/pyaMDeNM/pyAdMD-extcollect/openmm-gpu/pyadmd-distrib/src/pyadmd/modes/exciter.py", line 180, in generate_factors
+    return vecs.reshape(P, natom, 3)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: cannot reshape array of size 20568 into shape (1,6855,3)

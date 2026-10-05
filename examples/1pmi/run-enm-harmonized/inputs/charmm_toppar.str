@@ -1,0 +1,108 @@
+* Stream file for topology and parameter reading
+* 
+
+! protein topology and parameter
+open read card unit 10 name ../inputs/charmm_toppar/top_all36_prot.rtf
+read  rtf card unit 10
+
+open read card unit 20 name ../inputs/charmm_toppar/par_all36m_prot.prm
+read para card unit 20 flex
+
+! nucleic acids
+open read card unit 10 name ../inputs/charmm_toppar/top_all36_na.rtf
+read  rtf card unit 10 append
+
+open read card unit 20 name ../inputs/charmm_toppar/par_all36_na.prm
+read para card unit 20 append flex
+
+! carbohydrates
+open read card unit 10 name ../inputs/charmm_toppar/top_all36_carb.rtf
+read  rtf card unit 10 append
+
+open read card unit 20 name ../inputs/charmm_toppar/par_all36_carb.prm
+read para card unit 20 append flex
+
+! lipids
+open read card unit 10 name ../inputs/charmm_toppar/top_all36_lipid.rtf
+read  rtf card unit 10 append
+
+open read card unit 20 name ../inputs/charmm_toppar/par_all36_lipid.prm
+read para card unit 20 append flex
+
+! CGENFF
+open read card unit 10 name ../inputs/charmm_toppar/top_all36_cgenff.rtf
+read  rtf card unit 10 append
+
+open read card unit 20 name ../inputs/charmm_toppar/par_all36_cgenff.prm
+read para card unit 20 append flex
+
+! Phosphates and Sulfates
+stream ../inputs/charmm_toppar/toppar_all36_moreions.str
+
+! Interface FF
+open read card unit 10 name ../inputs/charmm_toppar/top_interface.rtf
+read  rtf card unit 10 append
+
+open read card unit 10 name ../inputs/charmm_toppar/par_interface.prm
+read para card unit 10 append flex
+
+stream ../inputs/charmm_toppar/toppar_all36_nano_lig.str
+stream ../inputs/charmm_toppar/toppar_all36_nano_lig_patch.str
+
+! Additional topologies and parameters for synthetic polymer
+stream ../inputs/charmm_toppar/toppar_all36_synthetic_polymer.str
+stream ../inputs/charmm_toppar/toppar_all36_synthetic_polymer_patch.str
+stream ../inputs/charmm_toppar/toppar_all36_polymer_solvent.str
+
+! Additional topologies and parameters for water and ions
+stream ../inputs/charmm_toppar/toppar_water_ions.str
+stream ../inputs/charmm_toppar/toppar_dum_noble_gases.str
+stream ../inputs/charmm_toppar/toppar_ions_won.str
+stream ../inputs/charmm_toppar/cam.str
+
+! Additional topologies and parameters for protein
+stream ../inputs/charmm_toppar/toppar_all36_prot_arg0.str
+stream ../inputs/charmm_toppar/toppar_all36_prot_c36m_d_aminoacids.str
+stream ../inputs/charmm_toppar/toppar_all36_prot_fluoro_alkanes.str
+stream ../inputs/charmm_toppar/toppar_all36_prot_heme.str
+stream ../inputs/charmm_toppar/toppar_all36_prot_na_combined.str
+stream ../inputs/charmm_toppar/toppar_all36_prot_retinol.str
+stream ../inputs/charmm_toppar/toppar_all36_prot_model.str
+stream ../inputs/charmm_toppar/toppar_all36_prot_modify_res.str
+
+! Additional topologies and parameters for nucleic acids
+stream ../inputs/charmm_toppar/toppar_all36_na_nad_ppi.str
+stream ../inputs/charmm_toppar/toppar_all36_na_rna_modified.str
+
+! Additional topologies and parameters for lipids
+stream ../inputs/charmm_toppar/toppar_all36_lipid_sphingo.str
+stream ../inputs/charmm_toppar/toppar_all36_lipid_archaeal.str
+stream ../inputs/charmm_toppar/toppar_all36_lipid_bacterial.str
+stream ../inputs/charmm_toppar/toppar_all36_lipid_cardiolipin.str
+stream ../inputs/charmm_toppar/toppar_all36_lipid_cholesterol.str
+stream ../inputs/charmm_toppar/toppar_all36_lipid_dag.str
+stream ../inputs/charmm_toppar/toppar_all36_lipid_inositol.str
+stream ../inputs/charmm_toppar/toppar_all36_lipid_lnp.str
+stream ../inputs/charmm_toppar/toppar_all36_lipid_lps.str
+stream ../inputs/charmm_toppar/toppar_all36_lipid_mycobacterial.str
+stream ../inputs/charmm_toppar/toppar_all36_lipid_miscellaneous.str
+stream ../inputs/charmm_toppar/toppar_all36_lipid_model.str
+stream ../inputs/charmm_toppar/toppar_all36_lipid_prot.str
+stream ../inputs/charmm_toppar/toppar_all36_lipid_tag.str
+stream ../inputs/charmm_toppar/toppar_all36_lipid_yeast.str
+stream ../inputs/charmm_toppar/toppar_all36_lipid_hmmm.str
+stream ../inputs/charmm_toppar/toppar_all36_lipid_detergent.str
+stream ../inputs/charmm_toppar/toppar_all36_lipid_ether.str
+stream ../inputs/charmm_toppar/toppar_all36_lipid_oxidized.str
+
+! Additional topologies and parameters for carbohydrates
+stream ../inputs/charmm_toppar/toppar_all36_carb_glycolipid.str
+stream ../inputs/charmm_toppar/toppar_all36_carb_glycopeptide.str
+stream ../inputs/charmm_toppar/toppar_all36_carb_imlab.str
+
+! Additional topologies and parameters for spin/fluorophore labels
+stream ../inputs/charmm_toppar/toppar_all36_label_spin.str
+stream ../inputs/charmm_toppar/toppar_all36_label_fluorophore.str
+
+
+

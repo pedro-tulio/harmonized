@@ -1,0 +1,17 @@
+load py_env/miniconda3/25.7.0 environment (rh9)
+Unloading the cpe module is insufficient to restore the system defaults.
+Please run 'source
+/opt/cray/pe/cpe/24.07/restore_lmod_system_defaults.[csh|sh]'. 
+remove gcc/13.2 - cray-mpich/8.1.30 - milan - cpe 24.07
+load gcc/13.2 - cray-mpich/8.1.30 - milan - cpe 24.07
+load math/mkl/2025.0/lp64/blas-lapack_gcc environment (rh9)
+load py_env/python/3.11.7 environment (rh9)
+load atomic_simu/charmm/c50b2 environment
+usage: pyadmd run [-h] -src {NAMD,OPENMM} -m {CA,HEAVY,CHARMM} -psf PSFFILE
+                  -pdb PDBFILE [-coor COORFILE] [-vel VELFILE] [-xsc XSCFILE]
+                  [-str STRFILE] [-rst RSTFILE] [-mod MODEFILE] [-nm MODES]
+                  [--recalc-method METHOD] [--subspace-search-modes MODES]
+                  [-ek KCAL/MOL] [-t PS] [-sel SELECTION] [-rep N]
+                  [-seed SEED] [--cycle-steps N] [--nh-frequency PS^-1]
+                  [--reuse-vectors] [-n] [-f] [-r] [--full-ener]
+pyadmd run: error: ENM recalculation is not compatible with CHARMM normal modes

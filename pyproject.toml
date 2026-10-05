@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyadmd"
+version = "3.2.2"
+description = "Adaptive Molecular Dynamics with Excited Normal Modes (aMDeNM) on OpenMM."
+readme = "README.md"
+license = "GPL-3.0-or-later"
+requires-python = ">=3.12"
+authors = [
+    { name = "Pedro Túlio Resende-Lara", email = "laraptr@unicamp.br" },
+]
+keywords = [
+    "molecular dynamics",
+    "normal modes",
+    "aMDeNM",
+    "OpenMM",
+    "enhanced sampling",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: Scientific/Engineering :: Chemistry",
+]
+
+dependencies = [
+    "numpy>=2.2.5",
+    "scipy>=1.16.0",
+    "mdanalysis>=2.9.0",
+    "matplotlib>=3.10.0",
+    "seaborn",
+    "pandas",
+    "openmm[cuda12]>=8.3.1",
+    "numba>=0.61.2",
+    "biopython",
+    "cupy-cuda12x>=13.6",
+]
+
+[project.scripts]
+pyadmd = "pyadmd.cli.main:main"
+
+[project.urls]
+Repository = "https://github.com/pedro-tulio/pyadmd"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+pyadmd = ["charmm/wrt-nm.mdu", "charmm/charmm_toppar.zip"]
